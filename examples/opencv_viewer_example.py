@@ -28,8 +28,13 @@ if not found_rgb:
     print("The demo requires Depth camera with Color sensor")
     exit(0)
 
-config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+### comment out initial config.enable_stream lines to run with different resolutions or frame rates
+# config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+# config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+
+# Just enable the streams without forcing a resolution/framerate
+config.enable_stream(rs.stream.depth)
+config.enable_stream(rs.stream.color)
 
 # Start streaming
 pipeline.start(config)
@@ -47,6 +52,13 @@ try:
         # Convert images to numpy arrays
         depth_image = np.asanyarray(depth_frame.get_data())
         color_image = np.asanyarray(color_frame.get_data())
+
+        '''
+        Most cameras (and the RealSense SDK) provide data in RGB (Red, Green, Blue) order.
+        OpenCV, for historical reasons, expects data in BGR (Blue, Green, Red) order.
+        So, we swap them with the line below:
+        '''
+        color_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
 
         # Apply colormap on depth image (image must be converted to 8-bit per pixel first)
         depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(depth_image, alpha=0.03), cv2.COLORMAP_JET)
