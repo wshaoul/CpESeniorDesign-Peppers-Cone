@@ -91,9 +91,10 @@ py -3.10 -m venv winvenv310
 ``` 
 .\winvenv310\Scripts\Activate.ps1 
 ```
-6. Install dependencies: 
+6. Install dependencies:
 ```
 pip install opencv-python mediapipe numpy
+pip install mediapipe==0.10.21
 ```
 7. Run the LIVE application
 ```
