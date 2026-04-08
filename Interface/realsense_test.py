@@ -22,8 +22,9 @@ except ImportError:
 
 
 # ── Configuration ────────────────────────────────────────────────────────────
-COLOR_W, COLOR_H = 640, 480
-DEPTH_W, DEPTH_H = 640, 480
+# D555 does not support 640x480 — use 1280x720 for both streams
+COLOR_W, COLOR_H = 1280, 720
+DEPTH_W, DEPTH_H = 1280, 720
 FPS_TARGET = 30
 
 # Depth colormap: COLORMAP_TURBO gives a perceptually clear hot→cold gradient.
