@@ -89,10 +89,18 @@ try:
         '''
         color_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
 
-        # Remove background - Set pixels further than clipping_distance to grey
-        grey_color = 153
+        # Remove background - Set pixels further than clipping_distance to any color
+        # set the color to any single decimal value to triple it into each RGB slot
+        # i.e. color = 0 -> (0,0,0) = black
+        # color = 153 # grey color, midway between 0 and 255
+        # color = 255 # white
+        color = 0 # black
+        
+        # to do a custom color, set it up in an np array with **BGR** order
+        # color = np.array([203, 192, 255], dtype='uint8')
+                
         depth_image_3d = np.dstack((depth_image,depth_image,depth_image)) #depth image is 1 channel, color is 3 channels
-        bg_removed = np.where((depth_image_3d > clipping_distance) | (depth_image_3d <= 0), grey_color, color_image)
+        bg_removed = np.where((depth_image_3d > clipping_distance) | (depth_image_3d <= 0), color, color_image)
 
         # Render images:
         #   depth align to color on left
