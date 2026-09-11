@@ -13,7 +13,6 @@ from tkinter import ttk, filedialog, messagebox
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
-from platform_support import create_selfie_segmenter, open_camera
 
 
 class RecordView(ttk.Frame):
@@ -158,7 +157,7 @@ class RecordView(ttk.Frame):
     def _open_camera(self):
         self._close_camera()
         idx = int(self.cam_index.get())
-        self.cap = open_camera(idx)
+        self.cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
         if not self.cap or not self.cap.isOpened():
             messagebox.showerror("Camera", f"Could not open camera index {idx}.")
             self.cap = None
@@ -176,18 +175,6 @@ class RecordView(ttk.Frame):
                 self.cap.release()
         finally:
             self.cap = None
-
-    def shutdown(self):
-        self.recording = False
-        if self.record_thread:
-            self.record_thread.join(timeout=1.0)
-        if self.writer:
-            self.writer.release()
-            self.writer = None
-        self._close_camera()
-        player = getattr(self, "_player", None)
-        if player is not None and player.winfo_exists():
-            player.close()
 
     def _choose_output(self):
         path = filedialog.asksaveasfilename(
@@ -284,7 +271,11 @@ class RecordView(ttk.Frame):
 
     # ---------- background removal helpers ----------
     def _build_segmentor(self):
-        return create_selfie_segmenter(model_selection=1)
+        try:
+            import mediapipe as mp
+            return mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
+        except Exception:
+            return None
 
     def _segment_person(self, bgr_square, segmentor):
         if segmentor is None:
@@ -312,13 +303,12 @@ class RecordView(ttk.Frame):
                 "No recorded video found. Please record and stop first.")
             return
 
-        from cone_player import open_circle_cone_player
-        try:
-            self._player = open_circle_cone_player(
-                self, in_path, bool(self.save_while_play_var.get())
-            )
-        except Exception as exc:
-            messagebox.showerror("Circle Screen", str(exc))
+        save_copy = bool(self.save_while_play_var.get())
+        threading.Thread(
+            target=self._circle_player_worker,
+            args=(in_path, save_copy),
+            daemon=True
+        ).start()
 
     def _circle_player_worker(self, in_path: str, save_copy: bool):
         # Import helpers from live_view_circle

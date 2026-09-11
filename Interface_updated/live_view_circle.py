@@ -15,12 +15,6 @@ import numpy as np
 import math
 import cv2
 from PIL import Image, ImageTk
-from platform_support import (
-    IS_WINDOWS,
-    camera_backends,
-    create_selfie_segmenter,
-    open_camera,
-)
 
 # Optional RealSense support
 try:
@@ -28,6 +22,15 @@ try:
     REALSENSE_AVAILABLE = True
 except ImportError:
     REALSENSE_AVAILABLE = False
+
+# Optional MediaPipe support
+try:
+    import mediapipe as mp
+    _mp_seg = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
+    MEDIAPIPE_AVAILABLE = True
+except Exception:
+    _mp_seg = None
+    MEDIAPIPE_AVAILABLE = False
 
 PREVIEW_W = 800
 PREVIEW_H = 450
@@ -226,13 +229,18 @@ def _rs_get_frames(pipeline, align):
 
 
 # ---------- Camera backends ----------
-BACKENDS = camera_backends()
+BACKENDS = [
+    ("MSMF (Windows 10/11)",  cv2.CAP_MSMF),
+    ("DSHOW (DirectShow)",    cv2.CAP_DSHOW),
+    ("ANY (let OpenCV pick)", cv2.CAP_ANY),
+]
 
 
 def _open_by_index(index, api_pref):
-    cap = open_camera(index, api_pref)
-    if cap is not None:
+    cap = cv2.VideoCapture(index, api_pref)
+    if cap.isOpened():
         return cap, "index", api_pref
+    cap.release()
     return None, None, None
 
 
@@ -292,7 +300,16 @@ class LiveView(ttk.Frame):
 
         self._cam_src = tk.StringVar(value="webcam")
 
-        self._segmentor = create_selfie_segmenter(model_selection=1)
+        # Initialise segmentor (graceful fallback if MediaPipe unavailable)
+        if MEDIAPIPE_AVAILABLE:
+            try:
+                import mediapipe as mp
+                self._segmentor = mp.solutions.selfie_segmentation.SelfieSegmentation(
+                    model_selection=1)
+            except Exception:
+                self._segmentor = None
+        else:
+            self._segmentor = None
 
         # --- Title ---
         ttk.Label(self, text="Live Display  –  Circle Hologram (Cone Warp)",
@@ -330,15 +347,14 @@ class LiveView(ttk.Frame):
         r1 = ttk.Radiobutton(cam_box, text="By Index",
                               variable=self.sel_mode, value="index",
                               command=self._update_controls)
-        r2 = ttk.Radiobutton(cam_box, text="By Name (DirectShow)",
+        r2 = ttk.Radiobutton(cam_box, text="By Name (DSHOW)",
                               variable=self.sel_mode, value="name",
-                              command=self._update_controls,
-                              state="normal" if IS_WINDOWS else "disabled")
+                              command=self._update_controls)
 
         idx_row = ttk.Frame(cam_box)
         ttk.Label(idx_row, text="Index:").grid(row=0, column=0, padx=(0, 6))
         self.idx_combo = ttk.Combobox(idx_row, state="readonly", width=36,
-                                       values=["0 – Default Camera"])
+                                       values=self._scan_indices())
         self.idx_combo.set(self.idx_combo["values"][0])
         self.idx_combo.grid(row=0, column=1, sticky="w")
         ttk.Button(idx_row, text="Rescan",
@@ -553,12 +569,6 @@ class LiveView(ttk.Frame):
             self.after(250, self._start_preview)
 
     def _list_names_ffmpeg(self):
-        if not IS_WINDOWS:
-            messagebox.showinfo(
-                "Camera names",
-                "Camera-name selection is only available on Windows. Use a camera index on this Mac.",
-            )
-            return
         vids, _ = _list_dshow_devices_via_ffmpeg()
         if vids:
             self.names_combo["values"] = vids
@@ -576,7 +586,7 @@ class LiveView(ttk.Frame):
 
     def _scan_indices(self, max_probe=6):
         friendly = []
-        vids, _ = _list_dshow_devices_via_ffmpeg() if IS_WINDOWS else ([], [])
+        vids, _ = _list_dshow_devices_via_ffmpeg()
         for i in range(max_probe):
             for label, api in BACKENDS:
                 cap = cv2.VideoCapture(i, api)
@@ -685,13 +695,6 @@ class LiveView(ttk.Frame):
         self.btn_preview.config(state="normal")
         self.btn_stop_preview.config(state="disabled")
         self.status.set("Status: idle")
-
-    def shutdown(self):
-        self._stop_fullscreen()
-        self._stop_preview()
-        close = getattr(self._segmentor, "close", None)
-        if callable(close):
-            close()
 
     def _preview_loop(self):
         if self._rs_pipeline is not None:

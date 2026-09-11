@@ -6,7 +6,6 @@ from tkinter import ttk, filedialog, messagebox
 
 import cv2
 import numpy as np
-from platform_support import create_selfie_segmenter
 
 
 class UploadView(ttk.Frame):
@@ -95,17 +94,12 @@ class UploadView(ttk.Frame):
                 pass
         self.winfo_toplevel().focus_set()
 
-    def shutdown(self):
-        player = getattr(self, "_player", None)
-        if player is not None and player.winfo_exists():
-            player.close()
-
     # ---------- file choose ----------
     def _choose_file(self):
         path = filedialog.askopenfilename(
             title="Choose a video file",
             filetypes=[
-                ("Video files", "*.mp4 *.mov *.m4v *.avi *.mkv *.webm"),
+                ("Video files", "*.mp4;*.mov;*.m4v;*.avi;*.mkv;*.webm"),
                 ("All files", "*.*"),
             ]
         )
@@ -119,13 +113,12 @@ class UploadView(ttk.Frame):
             messagebox.showwarning("Cone Screen", "Please choose an existing video file first.")
             return
 
-        from cone_player import open_single_cone_player
-        try:
-            self._player = open_single_cone_player(
-                self, in_path, bool(self.save_while_play_var.get())
-            )
-        except Exception as exc:
-            messagebox.showerror("Cone Screen", str(exc))
+        save_copy = bool(self.save_while_play_var.get())
+        threading.Thread(
+            target=self._cone_player_worker,
+            args=(in_path, save_copy),
+            daemon=True
+        ).start()
 
     # ---------- worker: process + play uploaded video ----------
     def _cone_player_worker(self, in_path: str, save_copy: bool):
@@ -249,7 +242,11 @@ class UploadView(ttk.Frame):
 
     # ---------- helpers ----------
     def _build_segmentor(self):
-        return create_selfie_segmenter(model_selection=1)
+        try:
+            import mediapipe as mp
+            return mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
+        except Exception:
+            return None
 
     def _segment_person(self, bgr_square, segmentor):
         if segmentor is None:

@@ -74,27 +74,6 @@ Our pre-alpha build establishes the foundation for a three-component system:
 
 ### Installation
 
-#### macOS
-
-The updated studio supports the built-in Mac camera through AVFoundation.
-Python 3.10 is recommended for MediaPipe compatibility.
-
-```bash
-cd Interface_updated
-python3.10 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements-macos.txt
-python studio_main.py
-```
-
-The first time you start a preview, allow camera access when macOS asks. If it
-was previously denied, enable the terminal or Python app under **System
-Settings → Privacy & Security → Camera**. RealSense controls remain disabled
-when the optional `pyrealsense2` package is not available.
-
-#### Windows
-
 1. Install VS Code and Python (version 3.10)
 2. Clone the repository:
    ```
