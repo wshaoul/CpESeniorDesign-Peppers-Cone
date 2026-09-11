@@ -1,5 +1,6 @@
 */winvenv310
 winvenv310/
+*/.venv/
 */__pycache__
 */__pycache__/
 */__pycache__/*
