@@ -1,0 +1,7 @@
+# Python 3.10 is recommended. This MediaPipe release retains the
+# selfie-segmentation API used by the background-removal pipeline.
+numpy>=1.26,<2
+opencv-python>=4.9,<5
+Pillow>=10,<13
+mediapipe==0.10.21
+ttkbootstrap>=1.10,<2

@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import ttk
 import threading
 from functools import wraps
+from platform_support import maximize_window
 
 # ---------- tiny threading helper ----------
 def run_in_thread(fn):
@@ -159,7 +160,6 @@ class ActionTile((tb.Frame if TTKB else ttk.Frame)):
             return "break"
 
         self.card.bind("<ButtonPress-1>", on_press)
-        self.card.bind("<Button-1>",      on_press)
         self.card.bind("<Return>",        on_press)
         self.card.bind("<space>",         on_press)
 
@@ -456,10 +456,18 @@ if TTKB:
                 page.grid(row=0, column=0, sticky="nsew")
 
             self.show_page("HomePage")
-            self.state("zoomed")
+            maximize_window(self)
+            self.protocol("WM_DELETE_WINDOW", self._close_app)
 
         def show_page(self, name: str):
             self.pages[name].tkraise()
+
+        def _close_app(self):
+            for page in self.pages.values():
+                shutdown = getattr(page, "shutdown", None)
+                if callable(shutdown):
+                    shutdown()
+            self.destroy()
 
 else:
     class App(tk.Tk):
@@ -479,9 +487,17 @@ else:
                 page.grid(row=0, column=0, sticky="nsew")
 
             self.show_page("HomePage")
+            self.protocol("WM_DELETE_WINDOW", self._close_app)
 
         def show_page(self, name: str):
             self.pages[name].tkraise()
+
+        def _close_app(self):
+            for page in self.pages.values():
+                shutdown = getattr(page, "shutdown", None)
+                if callable(shutdown):
+                    shutdown()
+            self.destroy()
 
 
 if __name__ == "__main__":
