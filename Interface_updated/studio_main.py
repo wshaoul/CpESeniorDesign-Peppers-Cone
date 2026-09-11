@@ -64,7 +64,8 @@ except Exception:
 
 APP_TITLE = "Live Studio"
 APP_W, APP_H = 1220, 760
-
+LIGHT_MODE_SECONDARY = "#1f4e79"  # dark blue
+DARK_MODE_SECONDARY = "#d9eaf7"   # light blue-white
 
 # ---------- Card / Tile helpers ----------
 def _create_round_rect(canvas, x1, y1, x2, y2, r=16, **kwargs):
@@ -77,43 +78,98 @@ def _create_round_rect(canvas, x1, y1, x2, y2, r=16, **kwargs):
 
 
 def make_card(parent, title=None, subtitle=None, pad=(20, 16), rounded=18):
-    """Rounded 'card' with light shadow + border and inner frame."""
-    try:
-        bg = parent.cget("background")
-    except tk.TclError:
-        bg = "#f8fafc"  # slate-50
+    """Rounded card that supports both light and dark mode."""
     wrapper = (tb.Frame if TTKB else ttk.Frame)(parent)
-    cnv = tk.Canvas(wrapper, bd=0, highlightthickness=0, bg=bg)
+
+    cnv = tk.Canvas(
+        wrapper,
+        bd=0,
+        highlightthickness=0
+    )
     cnv.pack(fill="both", expand=True)
 
-    content = (tb.Frame if TTKB else ttk.Frame)(cnv, padding=pad if TTKB else 0)
+    content = (tb.Frame if TTKB else ttk.Frame)(
+        cnv,
+        padding=pad if TTKB else 0
+    )
+
     state = {"win_id": None}
 
     def draw(_=None):
+        dark = (
+            getattr(cnv.winfo_toplevel(), "theme_mode", "light")
+            == "dark"
+        )
+
+        page_bg = "#22262b" if dark else "#f8fafc"
+        card_bg = "#2b3035" if dark else "#ffffff"
+        border = "#495057" if dark else "#e5e7eb"
+        shadow = "#181b1f" if dark else "#edf2ff"
+
+        cnv.configure(bg=page_bg)
+
         cnv.delete("bg")
+
         w = max(cnv.winfo_width(), 10)
         h = max(cnv.winfo_height(), 10)
-        _create_round_rect(cnv, 10, 12, w - 6, h - 6, rounded + 2,
-                           fill="#edf2ff", outline="#edf2ff", tags="bg")      # shadow
-        _create_round_rect(cnv, 6, 6, w - 10, h - 10, rounded,
-                           fill="#ffffff", outline="#e5e7eb", tags="bg")      # face
+
+        _create_round_rect(
+            cnv,
+            10, 12, w - 6, h - 6,
+            rounded + 2,
+            fill=shadow,
+            outline=shadow,
+            tags="bg"
+        )
+
+        _create_round_rect(
+            cnv,
+            6, 6, w - 10, h - 10,
+            rounded,
+            fill=card_bg,
+            outline=border,
+            tags="bg"
+        )
+
         if state["win_id"] is None:
-            state["win_id"] = cnv.create_window(22, 20, anchor="nw", window=content)
+            state["win_id"] = cnv.create_window(
+                22,
+                20,
+                anchor="nw",
+                window=content
+            )
+
+        cnv.itemconfigure(
+            state["win_id"],
+            width=max(1, w - 44)
+        )
 
     cnv.bind("<Configure>", draw)
+
+    # Allows the card to be redrawn after changing themes.
+    cnv.refresh_theme = draw
+
     draw()
 
     if title:
         head = (tb.Frame if TTKB else ttk.Frame)(content)
         head.pack(fill="x", pady=(0, 8))
+
         (tb.Label if TTKB else ttk.Label)(
-            head, text=title, font=("Segoe UI", 12, "bold")
+            head,
+            text=title,
+            font=("Segoe UI", 12, "bold")
         ).pack(side="left")
+
         if subtitle:
             (tb.Label if TTKB else ttk.Label)(
-                head, text=subtitle, **({"bootstyle": "secondary"} if TTKB else {})
+                head,
+                text=subtitle,
+                style="Muted.TLabel"
             ).pack(side="right")
+
         ttk.Separator(content).pack(fill="x", pady=(4, 10))
+
     return wrapper, content
 
 
@@ -142,7 +198,7 @@ class ActionTile((tb.Frame if TTKB else ttk.Frame)):
         )
         title_lbl.pack(anchor="w")
         desc_lbl = (tb.Label if TTKB else ttk.Label)(
-            textcol, text=desc, **({"bootstyle": "secondary"} if TTKB else {})
+            textcol, text=desc, style="Muted.TLabel"
         )
         desc_lbl.pack(anchor="w", pady=(2, 0))
 
@@ -291,7 +347,6 @@ class PreviewCanvas(tk.Canvas):
         self._pill_btn(inner, "Screen")
         spacer = (tb.Frame if TTKB else ttk.Frame)(inner); spacer.pack(side="left", padx=10)
         self._pill_btn(inner, "Start", primary=True)
-        self._pill_btn(inner, "Settings")
 
         self._overlay = self.create_window(0, 0, window=bar_bg, anchor="center")
         self._status_l = self.create_window(0, 0, window=left, anchor="nw")
@@ -320,95 +375,206 @@ class HomePage(ttk.Frame if not TTKB else tb.Frame):
         icon.pack_propagate(False); icon.pack(side="left", padx=(0, 10))
         (tb.Label if TTKB else ttk.Label)(leftgrp, text="Live Studio", font=("Segoe UI", 18, "bold")).pack(side="left")
 
-        rightgrp = (tb.Frame if TTKB else ttk.Frame)(header); rightgrp.pack(side="right")
-        (tb.Button if TTKB else ttk.Button)(rightgrp, text="Settings",
-                                            **({"bootstyle": "secondary-outline"} if TTKB else {})).pack(side="left")
+        rightgrp = (tb.Frame if TTKB else ttk.Frame)(header)
+        rightgrp.pack(side="right")
+        self.settings_button = (tb.Button if TTKB else ttk.Button)(
+            rightgrp,
+            text="Settings",
+            command=self.controller.open_settings,
+            **({"bootstyle": "primary-outline"} if TTKB else {})
+        )
+        self.settings_button.pack(side="left")
 
         # Body grid
-        body = (tb.Frame if TTKB else ttk.Frame)(root, padding=12)
+        # Centered dashboard body
+        body = (tb.Frame if TTKB else ttk.Frame)(
+            root,
+            padding=12
+        )
         body.grid(row=1, column=0, sticky="nsew")
-        body.columnconfigure(0, weight=7, uniform="col")
-        body.columnconfigure(1, weight=5, uniform="col")
+
+        # Empty outside columns center the content column.
+        body.columnconfigure(0, weight=1)
         body.rowconfigure(0, weight=1)
 
-        # LEFT
-        left = (tb.Frame if TTKB else ttk.Frame)(body)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
-        left.columnconfigure(0, weight=1)
+        content = (tb.Frame if TTKB else ttk.Frame)(body)
+        content.grid(row=0, column=0)
+        content.columnconfigure(0, weight=1)
 
-        qa_card, qa = make_card(left, "Quick Actions", "Choose what you want to do.")
+
+        # ---------- Quick Actions ----------
+        qa_card, qa = make_card(
+            content,
+            "Quick Actions",
+            "Choose what you want to do."
+        )
         qa_card.grid(row=0, column=0, sticky="ew")
 
-        # 3-across tile grid with page navigation (NON-BLOCKING)
-        tile_grid = TileGrid(qa, gap_x=12, gap_y=12, fixed_cols=3)
+        # Control the card height.
+        qa_card.configure(width=1100, height=310)
+        qa_card.pack_propagate(False)
+
+        tile_grid = TileGrid(
+            qa,
+            gap_x=12,
+            gap_y=12,
+            fixed_cols=3
+        )
         tile_grid.pack(fill="x")
 
         tiles = [
-            ActionTile(tile_grid, "Go Live", "Broadcast to RTMP", "🔴",
-                       command=lambda: self._nav_and_boot("LiveView")),
-            ActionTile(tile_grid, "Record", "Save locally", "🎬",
-                       command=lambda: self._nav_and_boot("RecordView")),
-            ActionTile(tile_grid, "Upload", "Send a file", "📤",
-                       command=lambda: self._nav_and_boot("UploadView")),
+            ActionTile(
+                tile_grid,
+                "Go Live",
+                "Broadcast to RTMP",
+                "🔴",
+                command=lambda: self._nav_and_boot("LiveView")
+            ),
+            ActionTile(
+                tile_grid,
+                "Record",
+                "Save locally",
+                "🎬",
+                command=lambda: self._nav_and_boot("RecordView")
+            ),
+            ActionTile(
+                tile_grid,
+                "Upload",
+                "Send a file",
+                "📤",
+                command=lambda: self._nav_and_boot("UploadView")
+            ),
         ]
+
         tile_grid.set_tiles(tiles)
 
-        # Recent
-        recent_card, recent = make_card(left, "Recent")
-        recent_card.grid(row=1, column=0, sticky="ew", pady=(12, 0))
-        rgrid = (tb.Frame if TTKB else ttk.Frame)(recent); rgrid.pack(fill="x")
-        (tb.Label if TTKB else ttk.Label)(rgrid, text="Recent recordings", font=("", 10, "bold")).grid(row=0, column=0, sticky="w")
-        (tb.Label if TTKB else ttk.Label)(rgrid, text="Uploads", font=("", 10, "bold")).grid(row=0, column=1, sticky="w", padx=(16, 0))
-        (tb.Label if TTKB else ttk.Label)(rgrid, text="hi.mp4 — 2 min ago",
-                                          **({"bootstyle": "secondary"} if TTKB else {})).grid(row=1, column=0, sticky="w", pady=(4, 0))
-        (tb.Label if TTKB else ttk.Label)(rgrid, text="demo.mov — yesterday",
-                                          **({"bootstyle": "secondary"} if TTKB else {})).grid(row=1, column=1, sticky="w", padx=(16, 0), pady=(4, 0))
+        # ---------- Recent ----------
+        recent_card, recent = make_card(
+            content,
+            "Recent"
+        )
+        recent_card.grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            pady=(12, 0)
+        )
+
+        recent_card.configure(width=1100,height=180)
+        recent_card.pack_propagate(False)
+
+        rgrid = (tb.Frame if TTKB else ttk.Frame)(recent)
+        rgrid.pack(fill="x")
+
+        (tb.Label if TTKB else ttk.Label)(
+            rgrid,
+            text="Recent recordings",
+            font=("", 10, "bold")
+        ).grid(
+            row=0,
+            column=0,
+            sticky="w"
+        )
+
+        (tb.Label if TTKB else ttk.Label)(
+            rgrid,
+            text="Uploads",
+            font=("", 10, "bold")
+        ).grid(
+            row=0,
+            column=1,
+            sticky="w",
+            padx=(16, 0)
+        )
+
+        (tb.Label if TTKB else ttk.Label)(
+            rgrid,
+            text="hi.mp4 — 2 min ago",
+            style="Muted.TLabel"
+        ).grid(
+            row=1,
+            column=0,
+            sticky="w",
+            pady=(4, 0)
+        )
+
+        (tb.Label if TTKB else ttk.Label)(
+            rgrid,
+            text="demo.mov — yesterday",
+            style="Muted.TLabel"
+        ).grid(
+            row=1,
+            column=1,
+            sticky="w",
+            padx=(16, 0),
+            pady=(4, 0)
+        )
+
         rgrid.columnconfigure((0, 1), weight=1, uniform="rcols")
 
-        # RIGHT
-        right = (tb.Frame if TTKB else ttk.Frame)(body)
-        right.grid(row=0, column=1, sticky="nsew")
-        right.columnconfigure(0, weight=1)
+        # ---------- Devices ----------
+        dev_card, dev = make_card(
+            content,
+            "Devices"
+        )
+        dev_card.grid(
+            row=2,
+            column=0,
+            sticky="ew",
+            pady=(12, 0)
+        )
 
-        prev_card, prev = make_card(right, "Preview", "1080p • 30 fps")
-        prev_card.grid(row=0, column=0, sticky="nsew")
-        surface = PreviewCanvas(prev); surface.pack(fill="x", pady=(2, 10))
+        dev_card.configure(width=1100, height=220)
+        dev_card.pack_propagate(False)
 
-        pick = (tb.Frame if TTKB else ttk.Frame)(prev); pick.pack(fill="x")
-        def _select(label, value):
-            col = (tb.Frame if TTKB else ttk.Frame)(pick)
-            col.pack(side="left", fill="x", expand=True, padx=(0, 10))
-            (tb.Label if TTKB else ttk.Label)(col, text=label,
-                                              **({"bootstyle": "secondary"} if TTKB else {})).pack(anchor="w", pady=(0, 2))
-            ent = (tb.Entry if TTKB else ttk.Entry)(col); ent.insert(0, value); ent.configure(state="readonly")
-            ent.pack(fill="x")
-        _select("Camera", "Integrated (1080p)")
-        _select("Microphone", "Yeti Nano")
-        _select("Speakers", "Realtek")
+        device_grid = (tb.Frame if TTKB else ttk.Frame)(dev)
+        device_grid.pack(fill="x")
 
-        dev_card, dev = make_card(right, "Devices")
-        dev_card.grid(row=1, column=0, sticky="ew", pady=(12, 0))
-        grid = (tb.Frame if TTKB else ttk.Frame)(dev); grid.pack(fill="x")
-        for i, (k, v) in enumerate([("Camera", "Integrated (1080p)"),
-                                    ("Microphone", "Yeti Nano"),
-                                    ("Speakers", "Realtek")]):
-            (tb.Label if TTKB else ttk.Label)(grid, text=k,
-                                              **({"bootstyle": "secondary"} if TTKB else {})).grid(row=i, column=0, sticky="w", pady=4)
-            (tb.Label if TTKB else ttk.Label)(grid, text=v).grid(row=i, column=1, sticky="e")
-        grid.columnconfigure(1, weight=1)
+        devices = [
+            ("Camera", "Integrated (1080p)"),
+            ("Microphone", "Yeti Nano"),
+            ("Speakers", "Realtek"),
+        ]
+
+        for i, (device_name, device_value) in enumerate(devices):
+            (tb.Label if TTKB else ttk.Label)(
+                device_grid,
+                text=device_name,
+                style="Muted.TLabel"
+            ).grid(
+                row=i,
+                column=0,
+                sticky="w",
+                pady=4
+            )
+
+            (tb.Label if TTKB else ttk.Label)(
+                device_grid,
+                text=device_value
+            ).grid(
+                row=i,
+                column=1,
+                sticky="e",
+                pady=4
+            )
+
+        device_grid.columnconfigure(1, weight=1)
 
         # Footer
         footer = (tb.Frame if TTKB else ttk.Frame)(root, padding=(16, 10))
         footer.grid(row=2, column=0, sticky="ew")
         (tb.Label if TTKB else ttk.Label)(footer, text="● Ready",
                                           **({"bootstyle": "success"} if TTKB else {})).pack(side="left")
-        rightbtns = (tb.Frame if TTKB else ttk.Frame)(footer); rightbtns.pack(side="right")
-        (tb.Button if TTKB else ttk.Button)(rightbtns, text="Start",
-                                            **({"bootstyle": "dark"} if TTKB else {})).pack(side="left", padx=4)
-        (tb.Button if TTKB else ttk.Button)(rightbtns, text="Stop",
-                                            **({"bootstyle": "secondary-outline"} if TTKB else {})).pack(side="left", padx=4)
-        (tb.Button if TTKB else ttk.Button)(rightbtns, text="Settings",
-                                            **({"bootstyle": "secondary-outline"} if TTKB else {})).pack(side="left", padx=4)
+        rightbtns = (tb.Frame if TTKB else ttk.Frame)(footer)
+        rightbtns.pack(side="right")
+
+        self.quit_button = (tb.Button if TTKB else ttk.Button)(
+            rightbtns,
+            text="Quit",
+            command=self.controller.destroy,
+            **({"bootstyle": "danger-outline"} if TTKB else {})
+        )
+        self.quit_button.pack(side="left", padx=4)
 
     def _nav_and_boot(self, page_name: str):
         """Raise page immediately; start heavy work on a background thread (if defined)."""
@@ -421,16 +587,101 @@ class HomePage(ttk.Frame if not TTKB else tb.Frame):
 
 
 # ---------- App (Router) ----------
+def refresh_custom_theme(widget):
+    """Redraw custom Canvas cards after changing themes."""
+    refresh = getattr(widget, "refresh_theme", None)
+
+    if callable(refresh):
+        refresh()
+
+    for child in widget.winfo_children():
+        refresh_custom_theme(child)
+
+
+def open_settings_dialog(app):
+    """Open the settings window with a dark-mode option."""
+    existing = getattr(app, "settings_window", None)
+
+    try:
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus_force()
+            return
+    except tk.TclError:
+        pass
+
+    window_cls = tb.Toplevel if TTKB else tk.Toplevel
+    win = window_cls(app)
+
+    app.settings_window = win
+
+    win.title("Settings")
+    win.geometry("380x190")
+    win.resizable(False, False)
+    win.transient(app)
+
+    body_cls = tb.Frame if TTKB else ttk.Frame
+    label_cls = tb.Label if TTKB else ttk.Label
+    check_cls = tb.Checkbutton if TTKB else ttk.Checkbutton
+    button_cls = tb.Button if TTKB else ttk.Button
+
+    body = body_cls(win, padding=24)
+    body.pack(fill="both", expand=True)
+
+    label_cls(
+        body,
+        text="Appearance",
+        font=("Segoe UI", 14, "bold")
+    ).pack(anchor="w")
+
+    label_cls(
+        body,
+        text="Choose how the Live Studio interface is displayed."
+    ).pack(anchor="w", pady=(4, 18))
+
+    dark_var = tk.BooleanVar(
+        value=app.theme_mode == "dark"
+    )
+
+    toggle_options = (
+        {"bootstyle": "success-round-toggle"}
+        if TTKB
+        else {}
+    )
+
+    check_cls(
+        body,
+        text="Dark mode",
+        variable=dark_var,
+        command=lambda: app.set_dark_mode(dark_var.get()),
+        **toggle_options
+    ).pack(side="left")
+
+    button_cls(
+        body,
+        text="Close",
+        command=win.destroy
+    ).pack(side="right")
+
+    win.protocol("WM_DELETE_WINDOW", win.destroy)
+    win.grab_set()
+
 if TTKB:
     class App(tb.Window):
         def __init__(self):
             super().__init__(themename="flatly")
+            self.theme_mode = "light"
+            self.settings_window = None
+            self.style.configure(
+                "Muted.TLabel",
+                foreground=LIGHT_MODE_SECONDARY
+            )
             self.title(APP_TITLE)
             self.geometry(f"{APP_W}x{APP_H}")
             self.minsize(1100, 680)
 
             # container for pages
-            container = tb.Frame(self, bootstyle="light")
+            container = tb.Frame(self)
             container.pack(fill="both", expand=True)
             container.grid_rowconfigure(0, weight=1)
             container.grid_columnconfigure(0, weight=1)
@@ -447,10 +698,57 @@ if TTKB:
         def show_page(self, name: str):
             self.pages[name].tkraise()
 
+        def open_settings(self):
+            open_settings_dialog(self)
+
+        def set_dark_mode(self, enabled: bool):
+            self.theme_mode = "dark" if enabled else "light"
+
+            self.style.theme_use(
+                "darkly" if enabled else "flatly"
+            )
+
+            secondary_color = (
+                DARK_MODE_SECONDARY
+                if enabled
+                else LIGHT_MODE_SECONDARY
+            )
+
+            self.style.configure(
+                "Muted.TLabel",
+                foreground=secondary_color
+            )
+
+            home = self.pages.get("HomePage")
+
+            if home is not None:
+                button_style = (
+                    "light-outline"
+                    if enabled
+                    else "primary-outline"
+                )
+
+                home.settings_button.configure(
+                    bootstyle=button_style
+                )
+
+                home.quit_button.configure(
+                    bootstyle=button_style
+                )
+
+            refresh_custom_theme(self)
+
 else:
     class App(tk.Tk):
         def __init__(self):
             super().__init__()
+            self.theme_mode = "light"
+            self.settings_window = None
+            self.style = ttk.Style(self)
+            self.style.configure(
+                "Muted.TLabel",
+                foreground=LIGHT_MODE_SECONDARY
+            )
             self.title(APP_TITLE)
             self.geometry(f"{APP_W}x{APP_H}")
             container = ttk.Frame(self)
@@ -468,6 +766,28 @@ else:
 
         def show_page(self, name: str):
             self.pages[name].tkraise()
+
+        def open_settings(self):
+            open_settings_dialog(self)
+
+        def set_dark_mode(self, enabled: bool):
+            self.theme_mode = "dark" if enabled else "light"
+            bg = "#22262b" if enabled else "#f8fafc"
+            fg = "#f8f9fa" if enabled else "#212529"
+            self.configure(bg=bg)
+            self.style.configure(".", background=bg, foreground=fg)
+            self.style.configure("TFrame", background=bg)
+            self.style.configure("TLabel", background=bg, foreground=fg)
+            self.style.configure(
+                "Muted.TLabel",
+                background=bg,
+                foreground=(
+                    DARK_MODE_SECONDARY
+                    if enabled
+                    else LIGHT_MODE_SECONDARY
+                )
+            )
+            refresh_custom_theme(self)
 
 
 if __name__ == "__main__":
