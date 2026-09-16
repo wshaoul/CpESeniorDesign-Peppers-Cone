@@ -18,6 +18,8 @@ import math
 import cv2
 from PIL import Image, ImageTk
 
+from mjpeg_stream import MJPEGStreamer
+
 # Optional RealSense support
 try:
     import pyrealsense2 as rs
@@ -399,6 +401,7 @@ class LiveView(ttk.Frame):
         self._preview_img = None
         self._last_bgr = None
         self._frame_lock = threading.Lock()
+        self._mjpeg_streamer = MJPEGStreamer(port=8081)  # wireless test tap
         self._cap = None
         self._preview_thread = None
         self._stop_preview_evt = threading.Event()
@@ -725,6 +728,7 @@ class LiveView(ttk.Frame):
         self._fs_hint.place(relx=0.5, rely=1.0, anchor="s", y=-14)
 
         self._fs_running = True
+        self._mjpeg_streamer.start()
         self.btn_fullscreen.config(state="disabled")
         self.btn_close_fullscreen.config(state="normal")
         self.status.set("Status: fullscreen output")
@@ -732,6 +736,7 @@ class LiveView(ttk.Frame):
 
     def _stop_fullscreen(self):
         self._fs_running = False
+        self._mjpeg_streamer.stop()
         if self.fs_win:
             try:
                 self.fs_win.destroy()
@@ -799,6 +804,7 @@ class LiveView(ttk.Frame):
         if frame is not None:
             use_seg = (self._fs_mode == "normal")
             warped  = self._apply_warp(frame, use_segmentation=use_seg)
+            self._mjpeg_streamer.update_frame(warped)  # wireless test tap
 
             # Fit to current screen size while preserving aspect
             try:
