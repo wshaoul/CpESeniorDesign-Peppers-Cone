@@ -13,9 +13,13 @@ chmod +x setup_and_run.command
 ./setup_and_run.command
 ```
 
-The first run creates `Interface_mac/.venv` and installs the tested dependency
+The first run creates `Interface_mac/macenv` and installs the tested dependency
 versions. Later launches can use the same command without reinstalling changed
 packages.
+
+Older `.venv` installations are migrated automatically. The launcher clears
+macOS hidden-file flags from the environment because Qt otherwise skips its
+`cocoa` platform plugin.
 
 When macOS asks, allow camera access. If permission was denied earlier, enable
 Terminal or Python under **System Settings → Privacy & Security → Camera**.

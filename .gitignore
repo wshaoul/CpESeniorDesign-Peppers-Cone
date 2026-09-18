@@ -1,6 +1,7 @@
 */winvenv310
 winvenv310/
 */.venv/
+Interface_mac/macenv/
 */__pycache__
 */__pycache__/
 */__pycache__/*
