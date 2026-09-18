@@ -7,7 +7,7 @@ import sys
 
 import cv2
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QImage, QKeyEvent, QPixmap
+from PySide6.QtGui import QFont, QImage, QKeyEvent, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -29,22 +29,62 @@ from PySide6.QtWidgets import (
 )
 
 from processing import CANVAS_SIZE, ConeProcessor, open_mac_camera
+from live_studio import LivePage
 
 
 STYLE = """
-QMainWindow, QWidget { background: #f5f7fb; color: #172033; font-size: 14px; }
-QFrame#card { background: white; border: 1px solid #dce3ef; border-radius: 12px; }
-QPushButton { background: #e8edf5; border: 0; border-radius: 8px; padding: 10px 16px; }
-QPushButton:hover { background: #dce5f2; }
-QPushButton#primary { background: #ef4444; color: white; font-weight: 600; }
-QPushButton#primary:hover { background: #dc2626; }
-QPushButton:disabled { color: #94a3b8; background: #e9edf3; }
-QLineEdit, QComboBox, QSpinBox { background: white; border: 1px solid #cbd5e1; border-radius: 6px; padding: 7px; }
-QLabel#title { font-size: 24px; font-weight: 700; }
-QLabel#section { font-size: 17px; font-weight: 650; }
-QLabel#status { color: #475569; }
-QTabBar::tab { padding: 10px 22px; }
-"""
+QWidget { background: transparent; color: #192336; font-size: 13px; }
+QMainWindow, QWidget#shell { background: #f3f5f9; }
+QDialog, QMessageBox { background: white; }
+QLabel { border: none; }
+QLabel#brandMark { background: #315ce8; color: white; border-radius: 12px; font-size: 16px; font-weight: 700; }
+QLabel#brandName { font-size: 20px; font-weight: 700; color: #15213a; }
+QLabel#eyebrow { font-size: 10px; font-weight: 700; color: #7b8799; }
+QLabel#badge { background: #e6ecfc; color: #3155ac; border-radius: 10px; padding: 6px 12px; font-size: 11px; font-weight: 600; }
+QFrame#card, QFrame#previewCard, QWidget#controlCard { background: white; border: 1px solid #e0e5ef; border-radius: 16px; }
+QLabel#title { font-size: 28px; font-weight: 700; color: #17243e; }
+QLabel#section { font-size: 15px; font-weight: 600; }
+QLabel#subtitle, QLabel#status { color: #66748b; font-size: 12px; }
+QLabel#tip { color: #697994; font-size: 11px; padding: 0; }
+QPushButton { background: white; border: 1px solid #dce3ef; border-radius: 10px; padding: 11px 18px; font-weight: 600; }
+QPushButton:hover { background: #f0f4fd; border-color: #b7c7eb; }
+QPushButton:pressed { background: #e3ebfc; }
+QPushButton:focus { border-color: #315ce8; }
+QPushButton#primary { background: #315ce8; border-color: #315ce8; color: white; }
+QPushButton#primary:hover { background: #244cce; border-color: #244cce; }
+QPushButton#primary:pressed { background: #1c3dae; }
+QPushButton#tvAction { background: #17243e; color: white; border-color: #17243e; }
+QPushButton#tvAction:hover { background: #283d60; }
+QPushButton#quiet { border: none; background: transparent; color: #63728b; text-align: left; padding: 8px 0; font-size: 12px; }
+QPushButton#quiet:hover { color: #315ce8; }
+QPushButton:disabled, QPushButton#primary:disabled, QPushButton#tvAction:disabled { background: #edf0f6; color: #a0aabd; border-color: #edf0f6; }
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox { background: #f8f9fc; border: 1px solid #e0e5ef; border-radius: 8px; padding: 9px 10px; selection-background-color: #315ce8; }
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus { border-color: #315ce8; }
+QComboBox::drop-down { border: none; width: 26px; }
+QComboBox::down-arrow { image: url("__CHEVRON_ICON__"); width: 12px; height: 12px; }
+QComboBox QAbstractItemView { background: white; color: #192336; border: 1px solid #dce3ef; selection-background-color: #e8eefc; selection-color: #244cce; padding: 4px; }
+QCheckBox { spacing: 9px; padding: 5px 0; font-size: 12px; }
+QCheckBox::indicator { width: 17px; height: 17px; border-radius: 5px; border: 1px solid #cbd5e5; background: white; }
+QCheckBox::indicator:checked { background: #315ce8; border-color: #315ce8; image: url("__CHECK_ICON__"); }
+QCheckBox::indicator:hover { border-color: #315ce8; }
+QScrollArea { border: none; background: transparent; }
+QScrollBar:vertical { background: transparent; width: 6px; margin: 6px 0; }
+QScrollBar::handle:vertical { background: #ccd5e4; border-radius: 3px; min-height: 30px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
+QTabWidget::pane { border: none; padding-top: 14px; }
+QTabBar { background: transparent; }
+QTabBar::tab { background: #e9edf5; color: #77849a; border: none; padding: 10px 26px; margin-right: 4px; border-radius: 9px; font-weight: 600; }
+QTabBar::tab:selected { background: white; color: #315ce8; }
+QTabBar::tab:hover:!selected { background: #e0e7f3; color: #405778; }
+QToolTip { background: #17243e; color: white; border: none; padding: 6px; }
+""".replace("__CHECK_ICON__", os.path.join(os.path.dirname(__file__), "assets", "check.svg")).replace("__CHEVRON_ICON__", os.path.join(os.path.dirname(__file__), "assets", "chevron.svg"))
+
+
+def configure_appearance(app):
+    app.setStyle("Fusion")
+    app.setFont(QFont("Helvetica Neue", 11))
+    app.setStyleSheet(STYLE)
 
 
 def frame_pixmap(frame):
@@ -99,118 +139,6 @@ class FullscreenDisplay(QWidget):
             self.close()
             return
         super().keyPressEvent(event)
-
-
-class LivePage(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.capture = None
-        self.processor = ConeProcessor()
-        self.fullscreen = FullscreenDisplay()
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.next_frame)
-
-        root = QVBoxLayout(self)
-        title = QLabel("Live Display")
-        title.setObjectName("title")
-        root.addWidget(title)
-        root.addWidget(QLabel("Mac camera → Pepper's Cone output"))
-
-        controls = QHBoxLayout()
-        self.camera_index = QSpinBox()
-        self.camera_index.setRange(0, 10)
-        self.resolution = QComboBox()
-        self.resolution.addItems(["1280x720", "1920x1080", "640x480"])
-        self.fps = QSpinBox()
-        self.fps.setRange(1, 60)
-        self.fps.setValue(30)
-        self.background = QCheckBox("Remove background")
-        self.background.setChecked(self.processor.segmentation_available)
-        self.background.setEnabled(self.processor.segmentation_available)
-        controls.addWidget(QLabel("Camera index"))
-        controls.addWidget(self.camera_index)
-        controls.addWidget(QLabel("Resolution"))
-        controls.addWidget(self.resolution)
-        controls.addWidget(QLabel("FPS"))
-        controls.addWidget(self.fps)
-        controls.addWidget(self.background)
-        controls.addStretch()
-        root.addLayout(controls)
-
-        actions = QHBoxLayout()
-        self.start_button = QPushButton("Start Preview")
-        self.start_button.setObjectName("primary")
-        self.stop_button = QPushButton("Stop")
-        self.output_button = QPushButton("Open Cone Screen")
-        self.stop_button.setEnabled(False)
-        self.output_button.setEnabled(False)
-        self.start_button.clicked.connect(self.start)
-        self.stop_button.clicked.connect(self.stop)
-        self.output_button.clicked.connect(self.open_output)
-        actions.addWidget(self.start_button)
-        actions.addWidget(self.stop_button)
-        actions.addWidget(self.output_button)
-        actions.addStretch()
-        root.addLayout(actions)
-
-        self.preview = VideoLabel()
-        root.addWidget(self.preview, 1)
-        self.status = QLabel("Ready")
-        self.status.setObjectName("status")
-        root.addWidget(self.status)
-
-    def start(self):
-        self.stop()
-        capture = open_mac_camera(self.camera_index.value())
-        if capture is None:
-            QMessageBox.critical(
-                self,
-                "Camera",
-                "Could not open that camera. Check macOS Camera permission or try another index.",
-            )
-            return
-        width, height = map(int, self.resolution.currentText().split("x"))
-        capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        capture.set(cv2.CAP_PROP_FPS, self.fps.value())
-        self.capture = capture
-        self.timer.start(max(1, round(1000 / self.fps.value())))
-        self.start_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
-        self.output_button.setEnabled(True)
-        self.status.setText(f"Live on camera {self.camera_index.value()}")
-
-    def next_frame(self):
-        if self.capture is None:
-            return
-        ok, frame = self.capture.read()
-        if not ok:
-            self.status.setText("Camera stopped returning frames")
-            return
-        self.preview.set_frame(frame)
-        if self.fullscreen.isVisible():
-            warped = self.processor.process(frame, self.background.isChecked())
-            self.fullscreen.video.set_frame(warped)
-
-    def open_output(self):
-        if self.capture is None:
-            return
-        self.fullscreen.showFullScreen()
-
-    def stop(self):
-        self.timer.stop()
-        if self.capture is not None:
-            self.capture.release()
-        self.capture = None
-        self.fullscreen.close()
-        self.start_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
-        self.output_button.setEnabled(False)
-        self.status.setText("Ready")
-
-    def shutdown(self):
-        self.stop()
-        self.processor.close()
 
 
 class ProcessedVideoWindow(FullscreenDisplay):
@@ -441,7 +369,34 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Pepper's Cone Studio — macOS")
-        self.resize(1220, 780)
+        self.resize(1280, 850)
+        self.setMinimumSize(1000, 720)
+        shell = QWidget()
+        shell.setObjectName("shell")
+        layout = QVBoxLayout(shell)
+        layout.setContentsMargins(24,20,24,20)
+        layout.setSpacing(20)
+        header = QHBoxLayout()
+        header.setSpacing(12)
+        mark = QLabel("PC")
+        mark.setObjectName("brandMark")
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mark.setFixedSize(44,44)
+        header.addWidget(mark)
+        brand = QVBoxLayout()
+        brand.setSpacing(3)
+        name = QLabel("Pepper's Cone")
+        name.setObjectName("brandName")
+        brand.addWidget(name)
+        descriptor = QLabel("DISPLAY STUDIO")
+        descriptor.setObjectName("eyebrow")
+        brand.addWidget(descriptor)
+        header.addLayout(brand)
+        header.addStretch()
+        badge = QLabel("MAC EDITION")
+        badge.setObjectName("badge")
+        header.addWidget(badge)
+        layout.addLayout(header)
         self.tabs = QTabWidget()
         self.live = LivePage()
         self.record = RecordPage()
@@ -449,7 +404,8 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.live, "Live")
         self.tabs.addTab(self.record, "Record")
         self.tabs.addTab(self.upload, "Upload")
-        self.setCentralWidget(self.tabs)
+        layout.addWidget(self.tabs,1)
+        self.setCentralWidget(shell)
 
     def closeEvent(self, event):
         self.live.shutdown()
@@ -460,7 +416,7 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    app.setStyleSheet(STYLE)
+    configure_appearance(app)
     window = MainWindow()
     window.show()
     return app.exec()
