@@ -76,9 +76,8 @@ Our pre-alpha build establishes the foundation for a three-component system:
 
 #### macOS application
 
-The Mac build is isolated in `Interface_mac` so it cannot affect the working
-Windows code. See `Interface_mac/README.md` for the one-command setup and run
-instructions.
+We added Mac support in `Interface_mac`. It runs separately from the Windows
+app. See `Interface_mac/README.md` for setup and usage.
 
 #### Windows application
 

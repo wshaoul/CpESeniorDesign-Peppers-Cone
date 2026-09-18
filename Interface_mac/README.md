@@ -1,35 +1,54 @@
-# Pepper's Cone Studio for macOS
+# Pepper's Cone for Mac
 
-This folder is a standalone Mac application. It does not import or modify the
-working Windows application in `Interface_updated`.
+We added Mac support in this folder. The Windows app stays in `Interface_updated`
+and runs separately.
 
-## First run
+## Run the app
 
-In Terminal:
+From the repository folder, open Terminal and run:
 
 ```bash
 cd Interface_mac
-chmod +x setup_and_run.command
 ./setup_and_run.command
 ```
 
-The first run creates `Interface_mac/macenv` and installs the tested dependency
-versions. Later launches can use the same command without reinstalling changed
-packages.
+The launcher sets up the Python environment and installs the required packages.
+Allow camera access when macOS asks. If needed, check **System Settings →
+Privacy & Security → Camera**.
 
-Older `.venv` installations are migrated automatically. The launcher clears
-macOS hidden-file flags from the environment because Qt otherwise skips its
-`cocoa` platform plugin.
+## Use the live display
 
-When macOS asks, allow camera access. If permission was denied earlier, enable
-Terminal or Python under **System Settings → Privacy & Security → Camera**.
+1. Connect the TV and set it as an extended display, not a mirrored display.
+2. Choose the TV under **Show on**. Click **Find my TV** if it isn't listed.
+3. Click **Start camera**, then **Show on TV**.
+4. Press **Escape** or **Q** to close the TV image. Click **Stop** to stop capture.
 
-## Camera selection
+The live tab shows your camera and the cone output side by side. It includes
+background removal and output-resolution options. **Smoother motion** is the
+default; the higher-resolution options may run more slowly. These options change
+the cone output resolution, not the camera's captured detail.
 
-Camera index `0` is normally the built-in camera. A RealSense color sensor may
-appear as another AVFoundation camera index, so try `1`, `2`, and so on. Intel
-does not currently publish a `pyrealsense2` wheel for macOS, so depth frames are
-not enabled in this Mac build; the Windows application remains unchanged and
-retains its RealSense color/depth implementation.
+## Advanced settings
 
-Press **Q** or **Escape** to close a fullscreen cone display.
+Use these to select a camera, request a camera resolution, adjust the cone fit,
+change reflection direction, or choose four, six, or eight repeated views.
+**Alignment rings** and **Orientation test card** help with setup. Click
+**Save cone fit** to keep your alignment settings on this Mac.
+
+Camera `0` is usually the built-in camera. Try another number for a USB camera.
+This Mac app does not support RealSense depth capture.
+
+## What still needs testing
+
+The layouts repeat the same camera view; they aren't true 360° video. More
+repeated views don't guarantee a better image. The external TV and physical cone
+still need testing for sharpness, alignment, and visibility from different angles.
+
+See the [test plan](research/physical_test_plan.md) and the
+[short improvement paper](research/cone_display_improvement_paper.md).
+
+## Run the tests
+
+```bash
+QT_QPA_PLATFORM=offscreen macenv/bin/python -m unittest test_processing test_projection test_live_worker test_live_ui -v
+```
