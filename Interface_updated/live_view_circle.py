@@ -42,20 +42,42 @@ CANVAS_SIZE = 800   # same as the original live_view.py
 # ---------- Warp helpers (copied from live_view.py so this file is self-contained) ----------
 
 def enhance_saturation_contrast(image_bgr, saturation_scale=1.3,
-                                 contrast_alpha=1.2, brightness_beta=10):
+                                 contrast_alpha=1.2, brightness_beta=10, gain=1.0):
     hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
     hsv[:, :, 1] = np.clip(hsv[:, :, 1] * saturation_scale, 0, 255)
     enhanced = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
     enhanced = cv2.convertScaleAbs(enhanced, alpha=contrast_alpha, beta=brightness_beta)
+    if gain != 1.0:
+        lut = np.clip(np.arange(256, dtype=np.float32) * gain, 0, 255).astype(np.uint8)
+        enhanced = cv2.LUT(enhanced, lut)
     return enhanced
+
+
+def to_square(frame, crop_to_square=True):
+    """Make a frame square without squashing it (crop-to-square or letterbox)."""
+    h, w = frame.shape[:2]
+    if h == w:
+        return frame
+    if crop_to_square:
+        side = min(h, w)
+        y0, x0 = (h - side) // 2, (w - side) // 2
+        return frame[y0:y0 + side, x0:x0 + side]
+    side = max(h, w)
+    canvas = np.zeros((side, side, frame.shape[2]), dtype=frame.dtype)
+    y0, x0 = (side - h) // 2, (side - w) // 2
+    canvas[y0:y0 + h, x0:x0 + w] = frame
+    return canvas
 
 
 def build_cone_maps(frame_size, canvas_size, span_deg=90, rotate_deg=270.0,
                     r_inner_frac=0.08, r_outer_frac=0.995,
-                    center_frac=(0.50, 0.50), radius_frac=1.00):
+                    center_frac=(0.50, 0.50), radius_frac=1.00,
+                    gap_deg=0.0, invert_radius=False, mirror=False):
     """
     Warp for a single Pepper's Cone arc face.
     Returns map_x, map_y (float32) — same function as in live_view.py.
+
+    gap_deg/invert_radius/mirror: see live_view.py's build_cone_maps for details.
     """
     map_x = np.full((canvas_size, canvas_size), -1, dtype=np.float32)
     map_y = np.full((canvas_size, canvas_size), -1, dtype=np.float32)
@@ -69,7 +91,10 @@ def build_cone_maps(frame_size, canvas_size, span_deg=90, rotate_deg=270.0,
     r_in  = r_in_frac  * R
     r_out = r_out_frac * R
 
-    half = math.radians(max(1, min(359, span_deg))) * 0.5
+    span_deg = max(1, min(359, span_deg))
+    half     = math.radians(span_deg) * 0.5
+    gap_half = math.radians(max(0.0, min(span_deg * 0.4, gap_deg))) * 0.5
+    active_half = max(math.radians(0.5), half - gap_half)
     rot  = math.radians(rotate_deg)
 
     y_coords, x_coords = np.ogrid[0:canvas_size, 0:canvas_size]
@@ -81,12 +106,17 @@ def build_cone_maps(frame_size, canvas_size, span_deg=90, rotate_deg=270.0,
     ang = np.where(ang < -np.pi, ang + 2 * np.pi, ang)
     ang = np.where(ang >  np.pi, ang - 2 * np.pi, ang)
 
-    valid = (r >= r_in) & (r <= r_out) & (ang >= -half) & (ang <= half)
+    valid = (r >= r_in) & (r <= r_out) & (ang >= -active_half) & (ang <= active_half)
 
     if np.any(valid):
-        u = np.clip((ang[valid] + half) / (2 * half), 0.0, 1.0)
+        u = np.clip((ang[valid] + active_half) / (2 * active_half), 0.0, 1.0)
         v = np.clip(1.0 - (r[valid] - r_in) / max(1.0, r_out - r_in), 0.0, 1.0)
-        map_x[valid] = (u * (frame_size - 1)).astype(np.float32)
+        if invert_radius:
+            v = 1.0 - v
+        sx = u * (frame_size - 1)
+        if mirror:
+            sx = (frame_size - 1) - sx
+        map_x[valid] = sx.astype(np.float32)
         map_y[valid] = (v * (frame_size - 1)).astype(np.float32)
 
     return map_x, map_y
@@ -95,13 +125,18 @@ def build_cone_maps(frame_size, canvas_size, span_deg=90, rotate_deg=270.0,
 def build_four_cone_maps(frame_size, canvas_size, span_deg=90,
                           r_inner_frac=0.08, r_outer_frac=0.995,
                           center_frac=(0.50, 0.50), radius_frac=1.00,
-                          base_rotate=270.0):
+                          base_rotate=270.0, gap_deg=0.0, invert_radius=False):
     """
     Build four cone-warp map pairs, each rotated 90° from the last, covering
     the full 360° around the centre.
 
     base_rotate=270 places the first face pointing upward (matching the
     default orientation of the original single-face live_view.py).
+
+    Left/right mirroring for this 4-face layout is handled per-face in
+    apply_four_cone_views (its orientation table already encodes the
+    validated flip pattern) — mirror is intentionally NOT a parameter here;
+    use apply_four_cone_views(..., mirror=True) to flip all four at once.
 
     Returns a list of four (map_x, map_y) tuples.
     """
@@ -117,6 +152,8 @@ def build_four_cone_maps(frame_size, canvas_size, span_deg=90,
             r_outer_frac=r_outer_frac,
             center_frac=center_frac,
             radius_frac=radius_frac,
+            gap_deg=gap_deg,
+            invert_radius=invert_radius,
         )
         maps.append((mx, my))
     return maps
@@ -125,7 +162,8 @@ def build_four_cone_maps(frame_size, canvas_size, span_deg=90,
 def apply_four_cone_views(frame_bgr, warp_maps, frame_size=FRAME_SIZE,
                            subject_scale=0.6,
                            saturation_scale=1.4, contrast_alpha=1.8,
-                           brightness_beta=-25):
+                           brightness_beta=-25, gain=1.0, mirror=False,
+                           crop_to_square=True):
     """
     Apply four cone-warp faces and composite them onto one canvas.
 
@@ -134,17 +172,22 @@ def apply_four_cone_views(frame_bgr, warp_maps, frame_size=FRAME_SIZE,
     frame_bgr     : BGR image (already background-removed if desired).
     warp_maps     : list of four (map_x, map_y) pairs from build_four_cone_maps.
     frame_size    : side length of the square input panel.
-    subject_scale : shrink factor so the subject doesn't bleed to the panel edge.
+    subject_scale : shrink (<1) or zoom-in (>1) factor for the subject.
+    mirror        : flips every face's source frame in addition to the
+                    already-validated per-face orientation table below.
+    crop_to_square: crop the central square (default) instead of squashing
+                    a non-square camera frame down to frame_size x frame_size.
 
     Returns
     -------
     canvas : (CANVAS_SIZE, CANVAS_SIZE, 3) uint8 BGR composite image.
     """
-    # 1) Resize to square
-    sq = cv2.resize(frame_bgr, (frame_size, frame_size), interpolation=cv2.INTER_AREA)
+    # 1) Fit to square without squashing, then resize to the working size
+    fitted = to_square(frame_bgr, crop_to_square=crop_to_square)
+    sq = cv2.resize(fitted, (frame_size, frame_size), interpolation=cv2.INTER_AREA)
 
-    # 2) Optional subject centring/scaling
-    if 0.0 < subject_scale < 1.0:
+    # 2) Optional subject centring/scaling (supports zooming in past 1.0 too)
+    if subject_scale < 1.0:
         scaled = cv2.resize(sq, (0, 0), fx=subject_scale, fy=subject_scale,
                             interpolation=cv2.INTER_AREA)
         padded = np.zeros_like(sq)
@@ -153,6 +196,12 @@ def apply_four_cone_views(frame_bgr, warp_maps, frame_size=FRAME_SIZE,
         padded[y_off:y_off + scaled.shape[0],
                x_off:x_off + scaled.shape[1]] = scaled
         sq = padded
+    elif subject_scale > 1.0:
+        big = cv2.resize(sq, (0, 0), fx=subject_scale, fy=subject_scale,
+                         interpolation=cv2.INTER_LINEAR)
+        y0 = max(0, (big.shape[0] - frame_size) // 2)
+        x0 = max(0, (big.shape[1] - frame_size) // 2)
+        sq = big[y0:y0 + frame_size, x0:x0 + frame_size]
 
     # 3) Source frames for each arc face.
     #
@@ -172,6 +221,8 @@ def apply_four_cone_views(frame_bgr, warp_maps, frame_size=FRAME_SIZE,
         top_view,   # face 2 (bottom, arc at 90°)       → appears as top rotated 180°
         sq,         # face 3 (left, arc at 180°)        → appears as top rotated 90° CCW
     ]
+    if mirror:
+        orientations = [cv2.flip(o, 1) for o in orientations]
 
     # 4) Remap each face and composite with np.maximum (handles any slight overlap)
     canvas_size = warp_maps[0][0].shape[0]
@@ -189,9 +240,128 @@ def apply_four_cone_views(frame_bgr, warp_maps, frame_size=FRAME_SIZE,
         saturation_scale=saturation_scale,
         contrast_alpha=contrast_alpha,
         brightness_beta=brightness_beta,
+        gain=gain,
     )
 
     return canvas
+
+
+def build_n_cone_maps(n_views, frame_size, canvas_size,
+                       r_inner_frac=0.08, r_outer_frac=0.995,
+                       center_frac=(0.50, 0.50), radius_frac=1.00,
+                       base_rotate=270.0, gap_deg=0.0, invert_radius=False):
+    """
+    General repeated-view cone mapping for any number of faces (e.g. 6 or 8),
+    each occupying an equal 360/n_views share of the circle.
+
+    Unlike build_four_cone_maps, this does NOT special-case per-face
+    left/right orientation — every face uses the same source frame
+    (optionally mirrored as a whole via apply_n_cone_views). That's a
+    deliberate simplification versus the hand-validated 4-face table above:
+    if a given face looks mirrored on your physical rig, toggle the Mirror
+    checkbox; there's no per-face fix here yet.
+
+    Returns a list of n_views (map_x, map_y) tuples.
+    """
+    span_deg = 360.0 / n_views
+    maps = []
+    for i in range(n_views):
+        rotate_deg = (base_rotate + i * span_deg) % 360.0
+        maps.append(build_cone_maps(
+            frame_size=frame_size,
+            canvas_size=canvas_size,
+            span_deg=span_deg,
+            rotate_deg=rotate_deg,
+            r_inner_frac=r_inner_frac,
+            r_outer_frac=r_outer_frac,
+            center_frac=center_frac,
+            radius_frac=radius_frac,
+            gap_deg=gap_deg,
+            invert_radius=invert_radius,
+        ))
+    return maps
+
+
+def apply_n_cone_views(frame_bgr, warp_maps, frame_size=FRAME_SIZE,
+                        subject_scale=0.6, saturation_scale=1.4,
+                        contrast_alpha=1.8, brightness_beta=-25, gain=1.0,
+                        mirror=False, crop_to_square=True):
+    """
+    Apply an arbitrary number of cone-warp faces (from build_n_cone_maps) and
+    composite them onto one canvas. Same per-face source frame for all faces
+    — see build_n_cone_maps' docstring for the mirroring caveat.
+    """
+    fitted = to_square(frame_bgr, crop_to_square=crop_to_square)
+    sq = cv2.resize(fitted, (frame_size, frame_size), interpolation=cv2.INTER_AREA)
+
+    if subject_scale < 1.0:
+        scaled = cv2.resize(sq, (0, 0), fx=subject_scale, fy=subject_scale,
+                            interpolation=cv2.INTER_AREA)
+        padded = np.zeros_like(sq)
+        y_off  = (frame_size - scaled.shape[0]) // 2
+        x_off  = (frame_size - scaled.shape[1]) // 2
+        padded[y_off:y_off + scaled.shape[0],
+               x_off:x_off + scaled.shape[1]] = scaled
+        sq = padded
+    elif subject_scale > 1.0:
+        big = cv2.resize(sq, (0, 0), fx=subject_scale, fy=subject_scale,
+                         interpolation=cv2.INTER_LINEAR)
+        y0 = max(0, (big.shape[0] - frame_size) // 2)
+        x0 = max(0, (big.shape[1] - frame_size) // 2)
+        sq = big[y0:y0 + frame_size, x0:x0 + frame_size]
+
+    if mirror:
+        sq = cv2.flip(sq, 1)
+
+    canvas_size = warp_maps[0][0].shape[0]
+    canvas = np.zeros((canvas_size, canvas_size, 3), dtype=np.uint8)
+    for mx, my in warp_maps:
+        warped = cv2.remap(sq, mx, my,
+                           interpolation=cv2.INTER_LINEAR,
+                           borderMode=cv2.BORDER_CONSTANT,
+                           borderValue=(0, 0, 0))
+        np.maximum(canvas, warped, out=canvas)
+
+    return enhance_saturation_contrast(
+        canvas, saturation_scale=saturation_scale, contrast_alpha=contrast_alpha,
+        brightness_beta=brightness_beta, gain=gain,
+    )
+
+
+def alignment_pattern(canvas_size, center_frac, radius_frac, r_inner_frac,
+                       r_outer_frac, n_views, base_rotate, gap_deg=0.0):
+    """Calibration rings + per-face arc boundaries for physically aligning the rig."""
+    image = np.zeros((canvas_size, canvas_size, 3), np.uint8)
+    cx = int(center_frac[0] * canvas_size)
+    cy = int(center_frac[1] * canvas_size)
+    R = int((canvas_size * 0.5) * max(0.10, min(2.0, radius_frac)))
+    r_in = int(max(0.0, min(0.99, r_inner_frac)) * R)
+    r_out = int(min(1.0, r_outer_frac) * R)
+    r_mid = (r_in + r_out) // 2
+
+    for radius, color in ((r_in, (120, 120, 120)), (r_mid, (90, 90, 90)), (r_out, (200, 200, 200))):
+        cv2.circle(image, (cx, cy), radius, color, 2)
+
+    span_deg = 360.0 / n_views
+    half = span_deg * 0.5
+    gap_half = max(0.0, min(span_deg * 0.4, gap_deg)) * 0.5
+    active_half = max(0.5, half - gap_half)
+
+    def _draw_ray(deg, color, label):
+        a = math.radians(deg)
+        end = (int(cx + R * math.cos(a)), int(cy + R * math.sin(a)))
+        cv2.line(image, (cx, cy), end, color, 2)
+        pos = (int(cx + R * 0.75 * math.cos(a)), int(cy + R * 0.75 * math.sin(a)))
+        cv2.putText(image, label, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+    for i in range(n_views):
+        center_deg = (base_rotate + i * span_deg) % 360.0
+        _draw_ray(center_deg, (0, 180, 255), str(i + 1))
+        _draw_ray(center_deg - active_half, (255, 180, 0), "")
+        _draw_ray(center_deg + active_half, (255, 180, 0), "")
+    cv2.putText(image, "Alignment Pattern", (14, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                0.8, (255, 255, 255), 2)
+    return image
 
 
 # ---------- RealSense helpers ----------
@@ -398,8 +568,21 @@ class LiveView(ttk.Frame):
         self.fps_entry.grid(row=0, column=3, sticky="w")
 
         # --- Cone Warp Tuning ---
-        tuning = ttk.LabelFrame(left, text="Cone Warp Tuning  (applied to all 4 faces)")
+        tuning = ttk.LabelFrame(left, text="Cone Warp Tuning  (applied to all faces)")
         tuning.pack(fill="x", padx=4, pady=(0, 10))
+
+        # Number of repeated faces around the circle
+        views_row = ttk.Frame(tuning)
+        views_row.grid(row=0, column=0, columnspan=3, sticky="w", padx=8, pady=(6, 2))
+        ttk.Label(views_row, text="Faces:").pack(side="left", padx=(0, 6))
+        self.views_var = tk.StringVar(value="4")
+        self.views_combo = ttk.Combobox(views_row, state="readonly", width=6,
+                                         values=["4", "6", "8"], textvariable=self.views_var)
+        self.views_combo.bind("<<ComboboxSelected>>", self._on_warp_change)
+        self.views_combo.pack(side="left")
+        ttk.Label(views_row, text="(6/8 use a simpler shared-orientation path — "
+                                   "use Mirror below if a face looks backward)",
+                  foreground="#888").pack(side="left", padx=8)
 
         def _row(label, var, from_, to_, default, row, fmt="{:.0f}"):
             ttk.Label(tuning, text=label).grid(
@@ -411,16 +594,16 @@ class LiveView(ttk.Frame):
             lbl.grid(row=row, column=2, padx=4)
             return slider, lbl
 
-        self.span_var        = tk.DoubleVar(value=90)
+        self.span_var        = tk.DoubleVar(value=90)   # informational only now; span derives from Faces
         self.r_inner_var     = tk.DoubleVar(value=0.08)
         self.r_outer_var     = tk.DoubleVar(value=0.995)
         self.center_x_var    = tk.DoubleVar(value=0.50)
         self.center_y_var    = tk.DoubleVar(value=0.50)
         self.base_rotate_var = tk.DoubleVar(value=270.0)
         self.scale_var       = tk.DoubleVar(value=0.6)
+        self.gap_var         = tk.DoubleVar(value=0.0)
+        self.gain_var         = tk.DoubleVar(value=1.0)
 
-        _, self.span_lbl        = _row("Span (deg):",    self.span_var,
-                                        60,  180,  90,    0)
         _, self.r_inner_lbl     = _row("Inner Radius:",  self.r_inner_var,
                                         0.0, 0.95, 0.08,  1, "{:.3f}")
         _, self.r_outer_lbl     = _row("Outer Radius:",  self.r_outer_var,
@@ -431,13 +614,30 @@ class LiveView(ttk.Frame):
                                         0.0, 1.0,  0.50,  4, "{:.2f}")
         _, self.base_rotate_lbl = _row("Base Rotation:", self.base_rotate_var,
                                         0,   360,  270,   5)
-        _, self.scale_lbl       = _row("Subject Scale:", self.scale_var,
-                                        0.2, 1.0,  0.6,   6, "{:.2f}")
+        _, self.scale_lbl       = _row("Subject Zoom:",  self.scale_var,
+                                        0.2, 1.5,  0.6,   6, "{:.2f}")
+        _, self.gap_lbl         = _row("Edge Gap (deg):", self.gap_var,
+                                        0,   40,   0,     7)
+        _, self.gain_lbl        = _row("Brightness Gain:", self.gain_var,
+                                        0.5, 2.0,  1.0,   8, "{:.2f}")
+
+        check_row = ttk.Frame(tuning)
+        check_row.grid(row=9, column=0, columnspan=3, sticky="w", padx=4, pady=(2, 4))
+        self.mirror_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(check_row, text="Mirror", variable=self.mirror_var,
+                         command=self._on_warp_change).pack(side="left", padx=6)
+        self.invert_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(check_row, text="Invert radius (head/feet)", variable=self.invert_var,
+                         command=self._on_warp_change).pack(side="left", padx=6)
+        self.crop_square_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(check_row, text="Crop to square (avoid squashing)",
+                         variable=self.crop_square_var,
+                         command=self._on_warp_change).pack(side="left", padx=6)
 
         tuning.grid_columnconfigure(1, weight=1)
         ttk.Button(tuning, text="Reset to Defaults",
                    command=self._reset_warp_params).grid(
-                       row=7, column=0, columnspan=3, pady=8)
+                       row=10, column=0, columnspan=3, pady=8)
 
         # --- Actions ---
         actions = ttk.Frame(left)
@@ -451,13 +651,16 @@ class LiveView(ttk.Frame):
         self.btn_close_fullscreen = ttk.Button(actions, text="Close Fullscreen",
                                                 command=self._stop_fullscreen,
                                                 state="disabled")
+        self.btn_align = ttk.Button(actions, text="Show Alignment Pattern",
+                                     command=self._toggle_alignment_pattern)
         back_btn = ttk.Button(actions, text="Back",
                                command=lambda: controller.show_page("HomePage"))
         self.btn_preview.grid(row=0, column=0, padx=6)
         self.btn_stop_preview.grid(row=0, column=1, padx=6)
         self.btn_fullscreen.grid(row=0, column=2, padx=6)
         self.btn_close_fullscreen.grid(row=0, column=3, padx=6)
-        back_btn.grid(row=0, column=4, padx=6)
+        self.btn_align.grid(row=0, column=4, padx=6)
+        back_btn.grid(row=0, column=5, padx=6)
 
         # --- Status ---
         status_box = ttk.Frame(left)
@@ -506,37 +709,76 @@ class LiveView(ttk.Frame):
         self.after(33, self._preview_tick)
 
     # ---------- Warp map management ----------
+    @property
+    def _n_views(self):
+        try:
+            return int(self.views_var.get())
+        except (ValueError, AttributeError):
+            return 4
+
     def _build_maps(self):
-        return build_four_cone_maps(
+        n = self._n_views
+        self.span_var.set(360.0 / n)
+        if n == 4:
+            return build_four_cone_maps(
+                frame_size   = FRAME_SIZE,
+                canvas_size  = CANVAS_SIZE,
+                span_deg     = 90,
+                r_inner_frac = self.r_inner_var.get(),
+                r_outer_frac = self.r_outer_var.get(),
+                center_frac  = (self.center_x_var.get(), self.center_y_var.get()),
+                radius_frac  = 1.00,
+                base_rotate  = self.base_rotate_var.get(),
+                gap_deg      = self.gap_var.get(),
+                invert_radius= self.invert_var.get(),
+            )
+        return build_n_cone_maps(
+            n_views      = n,
             frame_size   = FRAME_SIZE,
             canvas_size  = CANVAS_SIZE,
-            span_deg     = int(self.span_var.get()),
             r_inner_frac = self.r_inner_var.get(),
             r_outer_frac = self.r_outer_var.get(),
             center_frac  = (self.center_x_var.get(), self.center_y_var.get()),
             radius_frac  = 1.00,
             base_rotate  = self.base_rotate_var.get(),
+            gap_deg      = self.gap_var.get(),
+            invert_radius= self.invert_var.get(),
         )
 
     def _on_warp_change(self, _=None):
-        self.span_lbl.config(       text=f"{int(self.span_var.get())}")
         self.r_inner_lbl.config(    text=f"{self.r_inner_var.get():.3f}")
         self.r_outer_lbl.config(    text=f"{self.r_outer_var.get():.3f}")
         self.center_x_lbl.config(   text=f"{self.center_x_var.get():.2f}")
         self.center_y_lbl.config(   text=f"{self.center_y_var.get():.2f}")
         self.base_rotate_lbl.config(text=f"{int(self.base_rotate_var.get())}")
         self.scale_lbl.config(      text=f"{self.scale_var.get():.2f}")
+        self.gap_lbl.config(        text=f"{self.gap_var.get():.0f}")
+        self.gain_lbl.config(       text=f"{self.gain_var.get():.2f}")
         self._warp_maps = self._build_maps()
 
     def _reset_warp_params(self):
-        self.span_var.set(90)
+        self.views_var.set("4")
         self.r_inner_var.set(0.08)
         self.r_outer_var.set(0.995)
         self.center_x_var.set(0.50)
         self.center_y_var.set(0.50)
         self.base_rotate_var.set(270.0)
         self.scale_var.set(0.6)
+        self.gap_var.set(0.0)
+        self.gain_var.set(1.0)
+        self.mirror_var.set(False)
+        self.invert_var.set(False)
+        self.crop_square_var.set(True)
         self._on_warp_change()
+
+    # ---------- Alignment pattern ----------
+    def _toggle_alignment_pattern(self):
+        if not (self.fs_win and self._fs_running):
+            messagebox.showwarning("Alignment Pattern", "Open Fullscreen first.")
+            return
+        self._fs_mode = "normal" if self._fs_mode == "align" else "align"
+        if self._fs_mode_label:
+            self._fs_mode_label.config(text=self._fs_mode_text())
 
     # ---------- UI helpers ----------
     def _update_controls(self):
@@ -797,7 +1039,7 @@ class LiveView(ttk.Frame):
 
         self._fs_hint = tk.Label(
             self.fs_win,
-            text="Q / Esc: exit   ·   M: cycle mode   ·   S: switch source",
+            text="Q / Esc: exit   ·   M: cycle mode (incl. alignment)   ·   S: switch source",
             font=("Segoe UI", 10), fg="#aaaaaa", bg="#1a1a1a",
             padx=14, pady=5)
         self._fs_hint.place(relx=0.5, rely=1.0, anchor="s", y=-14)
@@ -827,6 +1069,7 @@ class LiveView(ttk.Frame):
         "normal": "Normal  (background removed)",
         "raw":    "Raw  (no segmentation)",
         "depth":  "Depth map  (RealSense)",
+        "align":  "Alignment Pattern",
     }
 
     def _fs_mode_text(self):
@@ -838,6 +1081,7 @@ class LiveView(ttk.Frame):
             has_depth = self._last_depth_vis is not None
         if has_depth:
             modes.append("depth")
+        modes.append("align")
         if self._fs_mode not in modes:
             self._fs_mode = "normal"
         else:
@@ -860,6 +1104,21 @@ class LiveView(ttk.Frame):
         if not self._fs_running:
             return
 
+        if self._fs_mode == "align":
+            canvas = alignment_pattern(
+                canvas_size=CANVAS_SIZE,
+                center_frac=(self.center_x_var.get(), self.center_y_var.get()),
+                radius_frac=1.00,
+                r_inner_frac=self.r_inner_var.get(),
+                r_outer_frac=self.r_outer_var.get(),
+                n_views=self._n_views,
+                base_rotate=self.base_rotate_var.get(),
+                gap_deg=self.gap_var.get(),
+            )
+            self._render_fullscreen_frame(canvas)
+            self.after(16, self._fullscreen_tick)
+            return
+
         frame = None
         with self._frame_lock:
             if self._fs_mode == "depth" and self._last_depth_vis is not None:
@@ -870,36 +1129,39 @@ class LiveView(ttk.Frame):
         if frame is not None:
             use_seg = (self._fs_mode == "normal")
             canvas  = self._apply_circle_hologram(frame, use_segmentation=use_seg)
-
-            try:
-                sw = self.fs_win.winfo_width()
-                sh = self.fs_win.winfo_height()
-                fh, fw = canvas.shape[:2]
-                scale  = min(sw / fw, sh / fh)
-                new_w  = max(1, int(fw * scale))
-                new_h  = max(1, int(fh * scale))
-                interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
-                disp   = cv2.resize(canvas, (new_w, new_h), interpolation=interp)
-            except Exception:
-                disp = canvas
-
-            rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
-            img = ImageTk.PhotoImage(Image.fromarray(rgb))
-            if self._fs_label is not None:
-                self._fs_label.config(image=img)
-                self._fs_label.image = img
-                self._fs_img = img
+            self._render_fullscreen_frame(canvas)
 
         self.after(16, self._fullscreen_tick)
+
+    def _render_fullscreen_frame(self, canvas):
+        try:
+            sw = self.fs_win.winfo_width()
+            sh = self.fs_win.winfo_height()
+            fh, fw = canvas.shape[:2]
+            scale  = min(sw / fw, sh / fh)
+            new_w  = max(1, int(fw * scale))
+            new_h  = max(1, int(fh * scale))
+            interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
+            disp   = cv2.resize(canvas, (new_w, new_h), interpolation=interp)
+        except Exception:
+            disp = canvas
+
+        rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
+        img = ImageTk.PhotoImage(Image.fromarray(rgb))
+        if self._fs_label is not None:
+            self._fs_label.config(image=img)
+            self._fs_label.image = img
+            self._fs_img = img
 
     # ---------- Rendering ----------
     def _apply_circle_hologram(self, frame_bgr, use_segmentation=True):
         """
-        Background-remove the frame, then pass it through four cone-warp arcs
+        Background-remove the frame, then pass it through the cone-warp arcs
         composited symmetrically around the centre.
         """
-        # 1) Square input
-        sq = cv2.resize(frame_bgr, (FRAME_SIZE, FRAME_SIZE), interpolation=cv2.INTER_AREA)
+        # 1) Square input — crop-to-square avoids squashing a 16:9 frame
+        fitted = to_square(frame_bgr, crop_to_square=self.crop_square_var.get())
+        sq = cv2.resize(fitted, (FRAME_SIZE, FRAME_SIZE), interpolation=cv2.INTER_AREA)
 
         # 2) Optional background removal
         if use_segmentation and self._segmentor is not None:
@@ -914,13 +1176,20 @@ class LiveView(ttk.Frame):
         else:
             fg = sq
 
-        # 3) Apply four cone-warp faces via the module-level helper
-        return apply_four_cone_views(
-            fg,
-            warp_maps      = self._warp_maps,
-            frame_size     = FRAME_SIZE,
-            subject_scale  = float(self.scale_var.get()),
+        # 3) Apply cone-warp faces via the module-level helper. n=4 keeps the
+        # hand-validated per-face orientation table; 6/8 use the simpler
+        # shared-orientation path (see build_n_cone_maps' docstring).
+        common = dict(
+            warp_maps        = self._warp_maps,
+            frame_size       = FRAME_SIZE,
+            subject_scale    = float(self.scale_var.get()),
             saturation_scale = 1.4,
             contrast_alpha   = 1.8,
             brightness_beta  = -25,
+            gain             = float(self.gain_var.get()),
+            mirror           = self.mirror_var.get(),
+            crop_to_square   = self.crop_square_var.get(),
         )
+        if self._n_views == 4:
+            return apply_four_cone_views(fg, **common)
+        return apply_n_cone_views(fg, **common)
