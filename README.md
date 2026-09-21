@@ -74,6 +74,13 @@ Our pre-alpha build establishes the foundation for a three-component system:
 
 ### Installation
 
+#### macOS application
+
+We added Mac support in `Interface_mac`. It runs separately from the Windows
+app. See `Interface_mac/README.md` for setup and usage.
+
+#### Windows application
+
 1. Install VS Code and Python (version 3.10)
 2. Clone the repository:
    ```
