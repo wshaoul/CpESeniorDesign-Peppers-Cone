@@ -7,7 +7,7 @@ import cv2
 from PySide6.QtCore import Qt, QTimer, QSettings
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
-    QFormLayout, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSpinBox,
+    QDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSpinBox,
     QVBoxLayout, QWidget)
 
 from processing import open_mac_camera
@@ -22,10 +22,43 @@ class Preview(QLabel):
         self.setStyleSheet("background:#080c14;color:#8998b2;border:1px solid #121b2c;border-radius:11px;font-size:13px;")
         self.source = None
         self.full_resolution = full_resolution
+        self.original_frame = None
+        self.detail_window = None
+
+    def show_detail(self):
+        if self.detail_window is None:
+            self.detail_window = QDialog(self)
+            self.detail_window.setWindowTitle("Actual pixels — live detail")
+            self.detail_window.resize(900,650)
+            layout = QVBoxLayout(self.detail_window)
+            self.detail_info = QLabel("Start the camera to see live detail. Scroll to inspect the image.")
+            self.detail_info.setWordWrap(True)
+            layout.addWidget(self.detail_info)
+            scroll = QScrollArea()
+            self.detail_image = QLabel()
+            scroll.setWidget(self.detail_image)
+            layout.addWidget(scroll)
+        self.detail_window.show()
+        self.detail_window.raise_()
+        if self.original_frame is not None:
+            self.update_detail(self.original_frame)
+
+    def update_detail(self,frame):
+        rgb = cv2.cvtColor(frame,cv2.COLOR_BGR2RGB)
+        h,w = rgb.shape[:2]
+        pixmap = QPixmap.fromImage(QImage(rgb.data,w,h,rgb.strides[0],QImage.Format.Format_RGB888).copy())
+        ratio = self.detail_image.devicePixelRatioF()
+        pixmap.setDevicePixelRatio(ratio)
+        self.detail_image.setPixmap(pixmap)
+        self.detail_image.setFixedSize(max(1,round(w/ratio)),max(1,round(h/ratio)))
+        self.detail_info.setText(f"{w} × {h} pixels • One image pixel per screen pixel. Scroll to inspect. This is live, not a sharpness enhancement.")
 
     def set_frame(self, frame):
+        self.original_frame = frame
+        if self.detail_window is not None and self.detail_window.isVisible():
+            self.update_detail(frame)
         # Preview only: the full-resolution output remains in the worker result.
-        size = max(self.width(), self.height())
+        size = round(max(self.width(), self.height()) * self.devicePixelRatioF())
         h,w = frame.shape[:2]
         if not self.full_resolution and max(h,w)>size:
             frame = cv2.resize(frame, (max(1,round(w*size/max(h,w))), max(1,round(h*size/max(h,w)))))
@@ -35,7 +68,7 @@ class Preview(QLabel):
 
     def draw(self):
         if self.source is not None:
-            ratio = self.devicePixelRatioF() if self.full_resolution else 1
+            ratio = self.devicePixelRatioF()
             pixmap = self.source.scaled(round(self.width()*ratio),round(self.height()*ratio),Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation)
             pixmap.setDevicePixelRatio(ratio)
             self.setPixmap(pixmap)
@@ -210,7 +243,8 @@ class LivePage(QWidget):
         self.mode.addItems(["Camera","Orientation test card","Alignment rings"])
         self.screen = QComboBox()
         self.quality = QComboBox()
-        self.quality.addItems(["Sharper picture","Smoother motion (recommended)","Highest detail (may be slower)"])
+        self.quality.addItems(["1080p output","720p output (faster)","Match display (up to 4K)"])
+        self.quality.setToolTip("Changes the cone output size, not camera capture detail. Higher resolutions may reduce frame rate.")
         self.quality.setCurrentIndex(1)
         self.views = QComboBox()
         for label,n in [("4 repeated views",4),("6 repeated views — experimental",6),("8 repeated views — experimental",8),("Single 200° arc — comparison",1)]:
@@ -227,11 +261,14 @@ class LivePage(QWidget):
         self.invert.setChecked(self.storage.value("invert",False,type=bool))
         self.portrait_crop = QCheckBox("Center portrait crop (larger subject)")
         self.portrait_crop.setChecked(self.storage.value("portrait_crop",True,type=bool))
+        self.antialias = QCheckBox("Smooth reduced detail (anti-aliasing)")
+        self.antialias.setChecked(True)
+        self.antialias.setToolTip("Average fine detail before shrinking into the cone layout. Turn off to compare with the original rendering.")
         settings_title = QLabel("Set up your display")
         settings_title.setObjectName("section")
         form.addRow(settings_title)
         form.addRow("Show on",self.screen)
-        form.addRow("Picture quality",self.quality)
+        form.addRow("TV output resolution",self.quality)
         form.addRow(self.background)
         self.background.toggled.connect(self.update_settings)
         refresh = QPushButton("Find my TV")
@@ -271,7 +308,7 @@ class LivePage(QWidget):
             self.spins[name] = spin
             form.addRow(label,spin)
             spin.valueChanged.connect(self.update_settings)
-        for widget in (self.mirror,self.invert,self.portrait_crop):
+        for widget in (self.mirror,self.invert,self.portrait_crop,self.antialias):
             form.addRow(widget)
             widget.toggled.connect(self.update_settings)
         save = QPushButton("Save cone fit")
@@ -306,6 +343,10 @@ class LivePage(QWidget):
             label.setObjectName("section")
             heading.addWidget(label)
             heading.addStretch()
+            detail = QPushButton("Inspect pixels")
+            detail.setToolTip("Open a live, scrollable view without shrinking the image.")
+            detail.clicked.connect(preview.show_detail)
+            heading.addWidget(detail)
             tag = QLabel(caption)
             tag.setObjectName("eyebrow")
             heading.addWidget(tag)
@@ -343,6 +384,8 @@ class LivePage(QWidget):
         for combo in (self.views,self.quality,self.screen):
             combo.currentIndexChanged.connect(self.update_settings)
         self.mode.currentIndexChanged.connect(self.source_changed)
+        self.resolution.currentIndexChanged.connect(self.source_changed)
+        self.camera_index.valueChanged.connect(self.source_changed)
 
     def toggle_advanced(self,visible):
         self.advanced_panel.setVisible(visible)
@@ -374,7 +417,7 @@ class LivePage(QWidget):
         for name in ("diameter","inner","center_x","center_y","zoom"):
             values[name] /= 100
         return ProjectionSettings(width=w,height=h,views=self.views.currentData(),
-            mirror=self.mirror.isChecked(),invert=self.invert.isChecked(),portrait_crop=self.portrait_crop.isChecked(),remove_background=self.background.isChecked(),**values)
+            mirror=self.mirror.isChecked(),invert=self.invert.isChecked(),portrait_crop=self.portrait_crop.isChecked(),remove_background=self.background.isChecked(),antialias=self.antialias.isChecked(),**values)
 
     def update_settings(self,*args):
         if self.worker is not None:
@@ -396,6 +439,7 @@ class LivePage(QWidget):
         if not self.stop():
             return
         resolution = tuple(map(int,self.resolution.currentText().split("x")))
+        self.timer.setInterval(33)
         self.worker = LiveWorker(self.camera_index.value(),resolution,30,self.settings(),self.mode.currentText())
         self.sequence = -1
         self.worker.thread.start()
@@ -425,7 +469,7 @@ class LivePage(QWidget):
         if self.fullscreen.isVisible():
             self.fullscreen.video.set_frame(output)
         seg = " • background removal unavailable" if worker.segmentation_available is False and self.background.isChecked() else ""
-        slow = " • For smoother motion try Balanced or disable background removal" if self.mode.currentText()=="Camera" and 0<fps<24 else ""
+        slow = " • For smoother motion try 720p output or disable background removal" if self.mode.currentText()=="Camera" and 0<fps<24 else ""
         self.technical_status.setText(f"Camera {frame.shape[1]}×{frame.shape[0]} • render {output.shape[1]}×{output.shape[0]} • {fps:.1f} processed fps • {ms:.0f} ms processing{seg}{slow}")
         message = "Showing on your selected display. Press Esc there to return." if self.fullscreen.isVisible() else "Preview is ready. Press Show on TV when you're ready."
         if self.mode.currentText()!="Camera":
@@ -433,7 +477,7 @@ class LivePage(QWidget):
         if worker.segmentation_available is False and self.background.isChecked():
             message += " Background removal isn't available on this Mac."
         elif self.mode.currentText()=="Camera" and 0<fps<24:
-            message += " Motion slow? Choose Smoother motion."
+            message += " Motion slow? Choose 720p output."
         self.status.setText(message)
 
     def open_output(self):
