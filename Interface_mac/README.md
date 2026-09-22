@@ -24,7 +24,7 @@ Privacy & Security → Camera**.
 4. Press **Escape** or **Q** to close the TV image. Click **Stop** to stop capture.
 
 The live tab shows your camera and the cone output side by side. It includes
-background removal and output-resolution options. **Smoother motion** is the
+background removal and output-resolution options. **720p output** is the
 default; the higher-resolution options may run more slowly. These options change
 the cone output resolution, not the camera's captured detail.
 
@@ -37,6 +37,18 @@ change reflection direction, or choose four, six, or eight repeated views.
 
 Camera `0` is usually the built-in camera. Try another number for a USB camera.
 This Mac app does not support RealSense depth capture.
+
+## Test a real 3D model
+
+Open **3D Model** to render a cube or sphere with perspective. Rotate the viewing
+angle or enable automatic rotation. **Four different angles** renders front,
+right, back, and left views from the geometry instead of repeating one image.
+You can also load an image as the model texture and send the experimental cone
+layout fullscreen to the TV.
+
+The model is real 3D geometry, but the cone pre-warp is not physically calibrated
+yet. Its purpose is to give us a known shape for measuring and correcting the
+deformation caused by the reflector.
 
 ## What still needs testing
 
