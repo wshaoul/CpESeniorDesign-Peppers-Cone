@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from processing import CANVAS_SIZE, ConeProcessor, open_mac_camera
 from live_studio import LivePage
+from model_studio import ModelPage
 
 
 STYLE = """
@@ -401,7 +402,9 @@ class MainWindow(QMainWindow):
         self.live = LivePage()
         self.record = RecordPage()
         self.upload = UploadPage()
+        self.model = ModelPage()
         self.tabs.addTab(self.live, "Live")
+        self.tabs.addTab(self.model, "3D Model")
         self.tabs.addTab(self.record, "Record")
         self.tabs.addTab(self.upload, "Upload")
         layout.addWidget(self.tabs,1)
@@ -409,6 +412,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.live.shutdown()
+        self.model.shutdown()
         self.record.shutdown()
         self.upload.shutdown()
         super().closeEvent(event)
