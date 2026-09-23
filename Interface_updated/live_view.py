@@ -1,3 +1,5 @@
+from live_layout import arrange_live, update_cone_preview, place_output
+from studio_theme import Card, ScrollPanel
 # live_view.py
 #
 # Live display view.
@@ -12,7 +14,6 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 import numpy as np
-import mediapipe as mp
 import math
 
 import cv2
@@ -306,23 +307,25 @@ class LiveView(ttk.Frame):
     """Live display (preview + fullscreen) using the same open logic as record_view."""
 
     def __init__(self, parent, controller):
-        super().__init__(parent)
+        super().__init__(parent, style="Shell.TFrame")
         self.controller = controller
 
         # Source toggle — initialized here so UI widgets can bind to it immediately
         self._cam_src = tk.StringVar(value="webcam")
 
         # --- Title ---
-        ttk.Label(self, text="Live Display", style="Header.TLabel").pack(pady=(10, 4))
-        ttk.Label(self, text="Pick a camera (index or name), preview it, then open fullscreen for the warped output.", style="Body.TLabel").pack(pady=(0, 10))
+        ttk.Label(self, text="Live display", font=("Segoe UI", 11, "bold"), style="PageTitle.TLabel").pack(anchor="w", pady=(0, 4))
+        ttk.Label(self, text="Your camera. A floating image. Ready to share.", style="PageSubtitle.TLabel").pack(anchor="w", pady=(0, 10))
 
         # Two panes: left controls, right preview
-        top = ttk.Frame(self)
-        top.pack(fill="both", expand=True)
-        left = ttk.Frame(top)
-        left.pack(side="left", fill="both", expand=True, padx=(0, 8))
-        right = ttk.Frame(top)
-        right.pack(side="right", fill="both", expand=True, padx=(8, 0))
+        top = ttk.Frame(self, style="Shell.TFrame")
+        top.pack(fill="both", expand=True, pady=(12, 0))
+        controls = ScrollPanel(top, width=410)
+        controls.pack(side="left", fill="y", padx=(0, 18))
+        left = controls.content
+        preview_card = Card(top)
+        preview_card.pack(side="right", fill="both", expand=True)
+        right = preview_card.content
 
         # --- Camera Source toggle ---
         src_box = ttk.LabelFrame(left, text="Camera Source")
@@ -330,15 +333,15 @@ class LiveView(ttk.Frame):
         ttk.Radiobutton(
             src_box, text="Webcam", variable=self._cam_src,
             value="webcam", command=self._on_src_change,
-        ).pack(side="left", padx=14, pady=6)
+        ).pack(anchor="w", padx=14, pady=6)
         ttk.Radiobutton(
             src_box, text="RealSense D455/D555", variable=self._cam_src,
             value="realsense", command=self._on_src_change,
             state="normal" if REALSENSE_AVAILABLE else "disabled",
-        ).pack(side="left", padx=14, pady=6)
+        ).pack(anchor="w", padx=14, pady=6)
         if not REALSENSE_AVAILABLE:
             ttk.Label(src_box, text="(install pyrealsense2 to enable)",
-                      foreground="#888").pack(side="left", padx=6)
+                      foreground="#888").pack(anchor="w", padx=6)
 
         # --- Camera selection ---
         cam_box = ttk.LabelFrame(left, text="Camera Selection")
@@ -352,24 +355,24 @@ class LiveView(ttk.Frame):
         # index row
         idx_row = ttk.Frame(cam_box)
         ttk.Label(idx_row, text="Index:").grid(row=0, column=0, padx=(0, 6))
-        self.idx_combo = ttk.Combobox(idx_row, state="readonly", width=36, values=self._scan_indices())
+        self.idx_combo = ttk.Combobox(idx_row, state="readonly", width=14, values=[str(index) for index in range(6)])
         self.idx_combo.set(self.idx_combo["values"][0])
         self.idx_combo.grid(row=0, column=1, sticky="w")
-        ttk.Button(idx_row, text="Rescan", command=self._rescan_indices).grid(row=0, column=2, padx=6)
-        ttk.Label(idx_row, text="Backend:").grid(row=0, column=3, padx=(12, 6))
-        self.backend_combo = ttk.Combobox(idx_row, state="readonly", values=[label for (label, _) in BACKENDS], width=22)
+        ttk.Button(idx_row, text="Rescan", command=self._rescan_indices).grid(row=2, column=1, padx=6)
+        ttk.Label(idx_row, text="Backend:").grid(row=1, column=0, padx=(12, 6))
+        self.backend_combo = ttk.Combobox(idx_row, state="readonly", values=[label for (label, _) in BACKENDS], width=14)
         self.backend_combo.set(BACKENDS[0][0])
-        self.backend_combo.grid(row=0, column=4, padx=(0, 6))
+        self.backend_combo.grid(row=1, column=1, padx=(0, 6))
 
         # name row
         name_row = ttk.Frame(cam_box)
         ttk.Label(name_row, text="Device Name:").grid(row=0, column=0, padx=(0, 6))
-        self.name_entry = ttk.Entry(name_row, width=36)
-        self.name_entry.grid(row=0, column=1)
-        ttk.Button(name_row, text="List Cameras (ffmpeg)", command=self._list_names_ffmpeg).grid(row=0, column=2, padx=6)
-        self.names_combo = ttk.Combobox(name_row, state="readonly", width=36, values=[])
-        self.names_combo.grid(row=1, column=1, pady=(6, 0), sticky="w")
-        ttk.Button(name_row, text="Use Selected", command=self._use_selected_name).grid(row=1, column=2, padx=6, pady=(6, 0))
+        self.name_entry = ttk.Entry(name_row, width=14)
+        self.name_entry.grid(row=1, column=0, columnspan=2, sticky="ew")
+        ttk.Button(name_row, text="Find cameras", command=self._list_names_ffmpeg).grid(row=0, column=1, padx=6)
+        self.names_combo = ttk.Combobox(name_row, state="readonly", width=14, values=[])
+        self.names_combo.grid(row=2, column=0, pady=(6, 0), sticky="w")
+        ttk.Button(name_row, text="Use Selected", command=self._use_selected_name).grid(row=2, column=1, padx=6, pady=(6, 0))
 
         # Arrange like: radio, its row; radio, its row
         r1.grid(row=0, column=0, sticky="w", padx=8, pady=(6, 2))
@@ -384,12 +387,15 @@ class LiveView(ttk.Frame):
         self.res_combo = ttk.Combobox(settings, state="readonly", width=12, values=["1280x720", "1920x1080", "640x480"])
         self.res_combo.set("1280x720")
         self.res_combo.grid(row=0, column=1, sticky="w")
-        ttk.Label(settings, text="FPS:").grid(row=0, column=2, padx=(16, 6), pady=8, sticky="w")
+        ttk.Label(settings, text="FPS:").grid(row=1, column=0, padx=(16, 6), pady=8, sticky="w")
         self.fps_entry = ttk.Entry(settings, width=6)
         self.fps_entry.insert(0, "30")
-        self.fps_entry.grid(row=0, column=3, sticky="w")
+        self.fps_entry.grid(row=1, column=1, sticky="w")
         
         # --- Cone Warp Tuning (add after Video Settings section) ---
+        advanced = tk.BooleanVar(value=False)
+        toggle = ttk.Checkbutton(left, text="Advanced cone settings", variable=advanced)
+        toggle.pack(anchor="w", padx=8, pady=(0, 8))
         tuning = ttk.LabelFrame(left, text="Cone Warp Tuning")
         tuning.pack(fill="x", padx=4, pady=(0, 10))
 
@@ -476,14 +482,14 @@ class LiveView(ttk.Frame):
         check_row.grid(row=9, column=0, columnspan=3, sticky="w", padx=4, pady=(2, 4))
         self.mirror_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(check_row, text="Mirror", variable=self.mirror_var,
-                         command=self._on_warp_change).pack(side="left", padx=6)
+                         command=self._on_warp_change).pack(anchor="w", padx=6)
         self.invert_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(check_row, text="Invert radius (head/feet)", variable=self.invert_var,
-                         command=self._on_warp_change).pack(side="left", padx=6)
+                         command=self._on_warp_change).pack(anchor="w", padx=6)
         self.crop_square_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(check_row, text="Crop to square (avoid squashing)",
                          variable=self.crop_square_var,
-                         command=self._on_warp_change).pack(side="left", padx=6)
+                         command=self._on_warp_change).pack(anchor="w", padx=6)
 
         tuning.grid_columnconfigure(1, weight=1)
 
@@ -491,35 +497,38 @@ class LiveView(ttk.Frame):
         ttk.Button(tuning, text="Reset to Defaults", command=self._reset_warp_params).grid(
             row=10, column=0, columnspan=3, pady=8)
 
+        tuning.pack_forget()
+        toggle.configure(command=lambda: tuning.pack(fill="x", padx=4, pady=(0, 10))
+                         if advanced.get() else tuning.pack_forget())
+
         # --- Actions ---
-        actions = ttk.Frame(left)
-        actions.pack(pady=(6, 2))
-        self.btn_preview = ttk.Button(actions, text="Start Preview", command=self._start_preview)
+        actions = ttk.Frame(self)
+        actions.pack(side="bottom", fill="x", pady=(14, 2), before=top)
+        self.btn_preview = ttk.Button(actions, text="Start camera", style="Primary.TButton", command=self._start_preview)
         self.btn_stop_preview = ttk.Button(actions, text="Stop Preview", command=self._stop_preview, state="disabled")
-        self.btn_fullscreen = ttk.Button(actions, text="Open Fullscreen", command=self._start_fullscreen)
+        self.btn_fullscreen = ttk.Button(actions, text="Show on TV", style="TV.TButton", command=self._start_fullscreen)
         self.btn_close_fullscreen = ttk.Button(actions, text="Close Fullscreen", command=self._stop_fullscreen, state="disabled")
         self.btn_align = ttk.Button(actions, text="Show Alignment Pattern", command=self._toggle_alignment_pattern)
-        back_btn = ttk.Button(actions, text="Back", command=lambda: controller.show_page("HomePage"))
-        self.btn_preview.grid(row=0, column=0, padx=6)
-        self.btn_stop_preview.grid(row=0, column=1, padx=6)
-        self.btn_fullscreen.grid(row=0, column=2, padx=6)
-        self.btn_close_fullscreen.grid(row=0, column=3, padx=6)
-        self.btn_align.grid(row=0, column=4, padx=6)
-        back_btn.grid(row=0, column=5, padx=6)
+        self.btn_preview.grid(row=0, column=0, sticky="ew", padx=4, pady=4)
+        self.btn_stop_preview.grid(row=0, column=1, sticky="ew", padx=4, pady=4)
+        self.btn_fullscreen.grid(row=0, column=2, sticky="ew", padx=4, pady=4)
+        self.btn_close_fullscreen.grid(row=0, column=3, sticky="ew", padx=4, pady=4)
+        self.btn_align.grid(row=0, column=4, sticky="ew", padx=4, pady=4)
 
         # --- Status ---
-        status_box = ttk.Frame(left)
-        status_box.pack(fill="x", padx=4, pady=(8, 0))
+        status_box = ttk.Frame(self)
+        status_box.pack(side="bottom", fill="x", padx=4, pady=(8, 0), before=actions)
         self.status = tk.StringVar(value="Status: idle")
         ttk.Label(status_box, textvariable=self.status).pack(anchor="w")
 
         # --- Right: LARGE fixed-size preview (no jumping) ---
-        ttk.Label(right, text="Preview", style="Body.TLabel").pack()
-        preview_container = tk.Frame(right, width=PREVIEW_W, height=PREVIEW_H, bg="black", highlightthickness=0)
-        preview_container.pack(padx=4, pady=4)
+        ttk.Label(right, text="Your camera  /  LIVE SOURCE", style="Body.TLabel").pack()
+        preview_container = tk.Frame(right, width=PREVIEW_W, height=PREVIEW_H, bg="#0f172a", highlightthickness=0)
+        preview_container.pack(fill="both", expand=True, padx=4, pady=4)
+        self._preview_container = preview_container
         preview_container.pack_propagate(False)  # keep container size fixed
 
-        self._preview_label = tk.Label(preview_container, bg="black", bd=0, highlightthickness=0)
+        self._preview_label = tk.Label(preview_container, bg="#0f172a", fg="#94a3b8", text="Press Start camera to begin", bd=0, highlightthickness=0)
         self._preview_label.place(relx=0.5, rely=0.5, anchor="center")
 
         # Preview state
@@ -562,9 +571,12 @@ class LiveView(ttk.Frame):
             radius_frac=1.00,
         )
 
-        self._segmentor = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
+        self._segmentor = None
+        self._segmentor_initialized = False
 
         # init
+        arrange_live(self, top, controls, left, preview_card,
+                     (src_box, cam_box, settings), toggle, tuning, actions, status_box)
         self._update_controls()
         self.after(33, self._preview_tick)  # UI repaint timer
 
@@ -633,7 +645,20 @@ class LiveView(ttk.Frame):
         self.idx_combo.set(vals[0])
 
     # ---------- Preview ----------
+    def _ensure_segmentor(self):
+        """Optional background removal must never prevent the UI from opening."""
+        if self._segmentor_initialized:
+            return
+        self._segmentor_initialized = True
+        try:
+            import mediapipe as mp
+            self._segmentor = mp.solutions.selfie_segmentation.SelfieSegmentation(
+                model_selection=1)
+        except Exception:
+            self._segmentor = None
+
     def _start_preview(self):
+        self._ensure_segmentor()
         if self._preview_thread and self._preview_thread.is_alive():
             return  # already running
 
@@ -792,7 +817,7 @@ class LiveView(ttk.Frame):
 
         if frame is not None:
             fh, fw = frame.shape[:2]
-            scale = min(PREVIEW_W / fw, PREVIEW_H / fh)
+            scale = min(max(1, self._preview_container.winfo_width()) / fw, max(1, self._preview_container.winfo_height()) / fh)
             new_w = max(1, int(fw * scale))
             new_h = max(1, int(fh * scale))
             resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
@@ -802,6 +827,12 @@ class LiveView(ttk.Frame):
             img = ImageTk.PhotoImage(Image.fromarray(rgb))
             self._preview_label.config(image=img)
             self._preview_label.image = img  # keep a reference
+
+        if frame is not None:
+            try:
+                update_cone_preview(self, frame)
+            except Exception as error:
+                self.status.set(f"Cone preview unavailable: {error}")
 
         self.after(33, self._preview_tick)  # ~30 fps UI update
 
@@ -816,7 +847,7 @@ class LiveView(ttk.Frame):
 
         self.fs_win = tk.Toplevel(self)
         self.fs_win.title("Pepper's Cone Display")
-        self.fs_win.attributes("-fullscreen", True)
+        place_output(self)
         self.fs_win.configure(bg="black")
         self.fs_win.bind("<Escape>", lambda e: self._stop_fullscreen())
         self.fs_win.bind("q",        lambda e: self._stop_fullscreen())
@@ -986,7 +1017,7 @@ class LiveView(ttk.Frame):
         sq = cv2.resize(fitted, (FRAME_SIZE, FRAME_SIZE), interpolation=cv2.INTER_AREA)
 
         # 2) optional background removal
-        if use_segmentation and self._segmentor is not None:
+        if use_segmentation and self.remove_background.get() and self._segmentor is not None:
             rgb = cv2.cvtColor(sq, cv2.COLOR_BGR2RGB)
             try:
                 seg = self._segmentor.process(rgb)
