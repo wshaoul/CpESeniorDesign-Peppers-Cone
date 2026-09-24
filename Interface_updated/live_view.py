@@ -19,6 +19,8 @@ import math
 import cv2
 from PIL import Image, ImageTk
 
+from mjpeg_server import MJPEGServer
+
 # Optional RealSense support
 try:
     import pyrealsense2 as rs
@@ -509,11 +511,16 @@ class LiveView(ttk.Frame):
         self.btn_fullscreen = ttk.Button(actions, text="Show on TV", style="TV.TButton", command=self._start_fullscreen)
         self.btn_close_fullscreen = ttk.Button(actions, text="Close Fullscreen", command=self._stop_fullscreen, state="disabled")
         self.btn_align = ttk.Button(actions, text="Show Alignment Pattern", command=self._toggle_alignment_pattern)
+        self._stream_var = tk.BooleanVar(value=False)
+        self.chk_stream = ttk.Checkbutton(actions, text="Stream to TV (MJPEG)",
+                                           variable=self._stream_var,
+                                           command=self._toggle_stream)
         self.btn_preview.grid(row=0, column=0, sticky="ew", padx=4, pady=4)
         self.btn_stop_preview.grid(row=0, column=1, sticky="ew", padx=4, pady=4)
         self.btn_fullscreen.grid(row=0, column=2, sticky="ew", padx=4, pady=4)
         self.btn_close_fullscreen.grid(row=0, column=3, sticky="ew", padx=4, pady=4)
         self.btn_align.grid(row=0, column=4, sticky="ew", padx=4, pady=4)
+        self.chk_stream.grid(row=0, column=5, sticky="ew", padx=4, pady=4)
 
         # --- Status ---
         status_box = ttk.Frame(self)
@@ -558,6 +565,8 @@ class LiveView(ttk.Frame):
         self._fs_running   = False
         self._fs_mode      = "normal"   # "normal" | "raw" | "depth"
         self._fs_mode_label = None      # tk.Label overlay showing current mode
+
+        self._mjpeg_server = None
 
         # Precompute warp maps (once)
         self._map_x, self._map_y = build_cone_maps(
@@ -903,6 +912,18 @@ class LiveView(ttk.Frame):
         self.btn_close_fullscreen.config(state="disabled")
         self.status.set("Status: idle")
 
+    # ---------- Wireless streaming (MJPEG) ----------
+    def _toggle_stream(self):
+        if self._stream_var.get():
+            if self._mjpeg_server is None:
+                self._mjpeg_server = MJPEGServer(port=8554)
+            self._mjpeg_server.start()
+            self.status.set(f"Status: streaming at {self._mjpeg_server.local_url()}")
+        else:
+            if self._mjpeg_server is not None:
+                self._mjpeg_server.stop()
+            self.status.set("Status: fullscreen output" if self._fs_running else "Status: idle")
+
     # ---------- Fullscreen mode / source helpers ----------
 
     _MODE_LABELS = {
@@ -974,6 +995,10 @@ class LiveView(ttk.Frame):
         if frame is not None:
             use_seg = (self._fs_mode == "normal")
             warped  = self._apply_warp(frame, use_segmentation=use_seg)
+
+            if self._mjpeg_server is not None and self._mjpeg_server.is_running:
+                self._mjpeg_server.update_frame(warped)
+
             self._render_fullscreen_frame(warped)
 
         # Aim ~60 Hz for smoother motion; adjust as needed
