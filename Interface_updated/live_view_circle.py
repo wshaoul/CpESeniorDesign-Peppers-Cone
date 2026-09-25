@@ -16,6 +16,8 @@ import math
 import cv2
 from PIL import Image, ImageTk
 
+from mjpeg_server import MJPEGServer
+
 # Optional RealSense support
 try:
     import pyrealsense2 as rs
@@ -200,13 +202,35 @@ RS_TIMEOUT_MS      = 3000
 RS_WARMUP_FRAMES   = 10
 
 
-def _rs_start():
+def _rs_try_start():
     pipeline = rs.pipeline()
     cfg      = rs.config()
     cfg.enable_stream(rs.stream.color, RS_W, RS_H, rs.format.bgr8, RS_FPS)
     cfg.enable_stream(rs.stream.depth, RS_W, RS_H, rs.format.z16,  RS_FPS)
     profile  = pipeline.start(cfg)
-    align    = rs.align(rs.stream.color)
+    return pipeline, profile
+
+
+def _rs_start():
+    try:
+        pipeline, profile = _rs_try_start()
+    except RuntimeError as e:
+        # Firmware can be left with a phantom "open stream" from a previous
+        # ungraceful exit (crash / force-quit) even though no process is
+        # currently holding the device. A hardware reset clears that state
+        # without needing a physical unplug/replug.
+        if "open-streams" not in str(e) and "Conflict" not in str(e):
+            raise
+        ctx = rs.context()
+        for dev in ctx.query_devices():
+            try:
+                dev.hardware_reset()
+            except Exception:
+                pass
+        time.sleep(3)
+        pipeline, profile = _rs_try_start()
+
+    align = rs.align(rs.stream.color)
     dev  = profile.get_device()
     name = dev.get_info(rs.camera_info.name)
     sn   = dev.get_info(rs.camera_info.serial_number)
@@ -451,13 +475,18 @@ class LiveView(ttk.Frame):
         self.btn_close_fullscreen = ttk.Button(actions, text="Close Fullscreen",
                                                 command=self._stop_fullscreen,
                                                 state="disabled")
+        self._stream_var = tk.BooleanVar(value=False)
+        self.chk_stream = ttk.Checkbutton(actions, text="Stream to TV (MJPEG)",
+                                           variable=self._stream_var,
+                                           command=self._toggle_stream)
         back_btn = ttk.Button(actions, text="Back",
                                command=lambda: controller.show_page("HomePage"))
         self.btn_preview.grid(row=0, column=0, padx=6)
         self.btn_stop_preview.grid(row=0, column=1, padx=6)
         self.btn_fullscreen.grid(row=0, column=2, padx=6)
         self.btn_close_fullscreen.grid(row=0, column=3, padx=6)
-        back_btn.grid(row=0, column=4, padx=6)
+        self.chk_stream.grid(row=0, column=4, padx=6)
+        back_btn.grid(row=0, column=5, padx=6)
 
         # --- Status ---
         status_box = ttk.Frame(left)
@@ -498,6 +527,8 @@ class LiveView(ttk.Frame):
         self._fs_running    = False
         self._fs_mode       = "normal"
         self._fs_mode_label = None
+
+        self._mjpeg_server  = None
 
         # Build initial warp maps
         self._warp_maps = self._build_maps()
@@ -823,6 +854,18 @@ class LiveView(ttk.Frame):
         self.btn_close_fullscreen.config(state="disabled")
         self.status.set("Status: idle")
 
+    # ---------- Wireless streaming (MJPEG) ----------
+    def _toggle_stream(self):
+        if self._stream_var.get():
+            if self._mjpeg_server is None:
+                self._mjpeg_server = MJPEGServer(port=8554)
+            self._mjpeg_server.start()
+            self.status.set(f"Status: streaming at {self._mjpeg_server.local_url()}")
+        else:
+            if self._mjpeg_server is not None:
+                self._mjpeg_server.stop()
+            self.status.set("Status: fullscreen output" if self._fs_running else "Status: idle")
+
     _MODE_LABELS = {
         "normal": "Normal  (background removed)",
         "raw":    "Raw  (no segmentation)",
@@ -870,6 +913,9 @@ class LiveView(ttk.Frame):
         if frame is not None:
             use_seg = (self._fs_mode == "normal")
             canvas  = self._apply_circle_hologram(frame, use_segmentation=use_seg)
+
+            if self._mjpeg_server is not None and self._mjpeg_server.is_running:
+                self._mjpeg_server.update_frame(canvas)
 
             try:
                 sw = self.fs_win.winfo_width()
