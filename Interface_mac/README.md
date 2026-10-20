@@ -46,9 +46,54 @@ right, back, and left views from the geometry instead of repeating one image.
 You can also load an image as the model texture and send the experimental cone
 layout fullscreen to the TV.
 
-The model is real 3D geometry, but the cone pre-warp is not physically calibrated
-yet. Its purpose is to give us a known shape for measuring and correcting the
-deformation caused by the reflector.
+Choose **Tiger demo** for a built-in articulated 3D calibration subject. It has
+procedural stripes, different geometry from every viewing angle, and a simple
+walking/breathing motion. Once a front-audience profile is saved, every tiger
+animation frame is sent through that same measured correction before TV output.
+
+The model is real 3D geometry. The quick cone layout is only a starting
+approximation; the front-audience workflow below measures the physical setup and
+builds a correction profile for the deformation caused by the reflector.
+
+### Calibrate the front audience view
+
+In **3D Model**, press **Calibrate cone for front audience**.
+
+1. Connect the TV as an extended display. Mount the iPhone at the audience's
+   eye height and distance with its rear camera facing the cone.
+2. Connect the iPhone using Continuity Camera (USB recommended). Use the same
+   Apple Account on both devices, trust the Mac when asked, and turn off camera
+   effects such as Center Stage. This camera connection still needs testing on
+   your hardware. [Apple setup guide](https://support.apple.com/en-us/102546).
+3. Start the camera. If it shows the Mac camera, stop it, try another camera
+   number, and restart. Confirm the preview is the iPhone's view.
+4. Select the TV and drag a tight box around the reflection inside the cone.
+   Exclude the directly visible TV surface. Keep everything still.
+5. Capture the patterns (23 at 720p, 24 at 1080p). Allow roughly 40 seconds at
+   the default timing. The app waits for each pattern and takes three fresh
+   samples. Cancel, Close, and Escape/Q on the TV stop the sequence.
+6. Inspect **Distortion map**, then compare **Grid without correction** and
+   **Grid with correction** in the camera preview. Look for straighter lines,
+   square cells and a round circle. Coverage measures mapped area, not accuracy.
+7. Press **Save and use this map** only after checking. It replaces the saved
+   profile and selects calibrated output in the model tab. Close calibration,
+   test the cube, then select **Tiger demo**.
+
+New maps keep the camera crop's proportions to avoid stretching the model.
+Use a dark background and dim lights. Moving the cone, TV or audience viewpoint
+requires another calibration. Check nearby viewing positions separately.
+
+With the environment already installed, open calibration directly:
+
+```bash
+cd Interface_mac
+macenv/bin/python app.py --calibrate
+```
+
+This follows the capture, inverse mapping, and weighted Gaussian smoothing
+approach summarized in Will's research notes and described in the original
+[Pepper's Cone paper, pages 4–5](https://grail.cs.washington.edu/wp-content/uploads/2017/10/luo2017pca.pdf).
+It is a prototype; software tests do not establish optical accuracy on the cone.
 
 ## What still needs testing
 
