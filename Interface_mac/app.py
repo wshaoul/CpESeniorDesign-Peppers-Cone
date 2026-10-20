@@ -423,6 +423,9 @@ def main():
     configure_appearance(app)
     window = MainWindow()
     window.show()
+    if "--calibrate" in sys.argv:
+        window.tabs.setCurrentWidget(window.model)
+        QTimer.singleShot(0,window.model.open_calibration)
     return app.exec()
 
 

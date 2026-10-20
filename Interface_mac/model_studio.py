@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog
 from mesh_renderer import RenderSettings, checker_texture, four_view_proof, render_model
 from model_warp import warp_model_views
 from projection import ProjectionSettings
+from calibration_studio import CalibrationDialog, default_profile_path
+from cone_calibration import CalibrationProfile
 
 
 class ModelPreview(QLabel):
@@ -108,7 +110,16 @@ class ModelPage(QWidget):
         self.texture = checker_texture()
         self.storage = QSettings("PeppersCone","MacModelStudio")
         self.tv = ModelTVWindow()
+        self.calibration_dialog = None
+        self.calibration_profile = None
+        profile_path = default_profile_path()
+        if profile_path.exists():
+            try:
+                self.calibration_profile = CalibrationProfile.load(profile_path)
+            except (OSError, ValueError, KeyError):
+                pass
         self.angle = 25
+        self.animation_phase = 0.0
         self.current_raw = None
         self.current_output = None
 
@@ -134,11 +145,24 @@ class ModelPage(QWidget):
         section.setObjectName("section")
         form.addRow(section)
         self.model = QComboBox()
-        self.model.addItems(["Cube","Sphere"])
+        self.model.addItems(["Cube","Sphere","Tiger demo"])
         form.addRow("Shape",self.model)
         self.layout_mode = QComboBox()
         self.layout_mode.addItems(["Single perspective view","Four different angles"])
         form.addRow("View test",self.layout_mode)
+        self.output_mode = QComboBox()
+        self.output_mode.addItems(["Quick cone layout (uncalibrated)",
+                                   "Front audience (calibrated)"])
+        form.addRow("Deformation correction",self.output_mode)
+        self.calibrate_button = QPushButton("Calibrate cone for front audience")
+        self.calibrate_button.setObjectName("primary")
+        self.calibrate_button.clicked.connect(self.open_calibration)
+        form.addRow(self.calibrate_button)
+        self.calibration_status = QLabel()
+        self.calibration_status.setObjectName("tip")
+        self.calibration_status.setWordWrap(True)
+        form.addRow(self.calibration_status)
+        self.update_calibration_status()
         self.output_position = QComboBox()
         for label,rotation in (("Top",270),("Right",0),("Bottom",90),("Left",180)):
             self.output_position.addItem(label,rotation)
@@ -170,6 +194,9 @@ class ModelPage(QWidget):
         self.auto_rotate = QCheckBox("Rotate model automatically")
         self.auto_rotate.setChecked(True)
         form.addRow(self.auto_rotate)
+        self.animate_model = QCheckBox("Animate tiger motion")
+        self.animate_model.setChecked(True)
+        form.addRow(self.animate_model)
         self.advanced_button = QPushButton("Advanced settings ▸")
         self.advanced_button.setObjectName("quiet")
         self.advanced_button.setCheckable(True)
@@ -183,6 +210,7 @@ class ModelPage(QWidget):
         self.output_size = QComboBox()
         self.output_size.addItem("720p output",(1280,720))
         self.output_size.addItem("1080p output",(1920,1080))
+        self.output_size.setCurrentIndex(int(self.storage.value("output_size",1)))
         form.addRow("TV output",self.output_size)
         self.screen = QComboBox()
         self.refresh_screens()
@@ -255,7 +283,7 @@ class ModelPage(QWidget):
         form.addRow(self.advanced_panel)
         self.advanced_panel.hide()
         self.advanced_button.toggled.connect(self.toggle_advanced)
-        note = QLabel("Research milestone: this is real 3D geometry. The current cone warp is only a starting approximation; measured optical calibration comes next.")
+        note = QLabel("Calibrate at the audience's viewing position, then check the grid before saving. The quick cone layout is an approximation. A saved map corrects the measured view; other audience positions still need testing.")
         note.setObjectName("tip")
         note.setWordWrap(True)
         form.addRow(note)
@@ -284,6 +312,8 @@ class ModelPage(QWidget):
             top.addStretch()
             tag = QLabel(caption)
             tag.setObjectName("eyebrow")
+            if widget is self.warp_preview:
+                self.warp_tag = tag
             top.addWidget(tag)
             card_layout.addLayout(top)
             card_layout.addWidget(widget,1)
@@ -296,6 +326,9 @@ class ModelPage(QWidget):
 
         for widget in (self.model,self.layout_mode,self.output_size):
             widget.currentIndexChanged.connect(self.render)
+        self.model.currentIndexChanged.connect(self.update_model_controls)
+        self.animate_model.toggled.connect(self.render)
+        self.output_mode.currentIndexChanged.connect(self.change_output_mode)
         self.output_position.currentIndexChanged.connect(self.change_output_side)
         for slider in (self.yaw,self.elevation):
             slider.valueChanged.connect(self.render)
@@ -306,12 +339,14 @@ class ModelPage(QWidget):
         QApplication.instance().screenAdded.connect(self.refresh_screens)
         QApplication.instance().screenRemoved.connect(self.refresh_screens)
         self.render()
+        self.update_model_controls()
 
     def settings(self,width=960,height=540,yaw=None):
         return RenderSettings(width=width,height=height,
             yaw=self.yaw.value() if yaw is None else yaw,
             elevation=self.elevation.value(),model=self.model.currentText(),
-            scale=self.model_scale.value()/100,fov=self.model_fov.value())
+            scale=self.model_scale.value()/100,fov=self.model_fov.value(),
+            animation_phase=self.animation_phase)
 
     def cone_settings(self):
         values = {name:spin.value() for name,spin in self.spins.items()}
@@ -325,7 +360,7 @@ class ModelPage(QWidget):
         settings = self.settings(640,360)
         views = four_view_proof(settings,self.texture) if self.layout_mode.currentIndex() else [render_model(settings,self.texture)]
         self.current_raw = views[0]
-        self.current_output = warp_model_views(views,960,540,self.cone_settings())
+        self.current_output = self.make_output(views,960,540)
         if len(views)==4:
             comparison = np.zeros((540,960,3),np.uint8)
             labels = ("FRONT","RIGHT","BACK","LEFT")
@@ -346,12 +381,92 @@ class ModelPage(QWidget):
         # Rendering every source at the full TV size wastes most of the work.
         settings = self.settings(640,360)
         views = four_view_proof(settings,self.texture) if self.layout_mode.currentIndex() else [render_model(settings,self.texture)]
-        self.tv.preview.set_frame(warp_model_views(views,width,height,self.cone_settings()))
+        self.tv.preview.set_frame(self.make_output(views,width,height))
+
+    def make_output(self,views,width,height):
+        if self.output_mode.currentIndex()==1 and self.calibration_profile is not None:
+            return self.calibration_profile.apply(views[0])
+        return warp_model_views(views,width,height,self.cone_settings())
+
+    def change_output_mode(self,*args):
+        calibrated = self.output_mode.currentIndex()==1
+        if calibrated and self.calibration_profile is None:
+            self.output_mode.blockSignals(True)
+            self.output_mode.setCurrentIndex(0)
+            self.output_mode.blockSignals(False)
+            self.status.setText("No front-audience calibration exists yet. Press Calibrate cone for front audience first.")
+            return
+        self.layout_mode.setEnabled(not calibrated)
+        self.output_size.setEnabled(not calibrated)
+        if calibrated:
+            self.layout_mode.setCurrentIndex(0)
+            self.warp_tag.setText("CALIBRATED FRONT VIEW")
+            self.status.setText("Using the measured deformation map for the center-front audience position.")
+        else:
+            self.warp_tag.setText("UNCALIBRATED PRE-WARP")
+        self.render()
+
+    def open_calibration(self):
+        if self.tv.isVisible():
+            self.tv.dismiss()
+        if self.calibration_dialog is not None:
+            self.calibration_dialog.close()
+        self.calibration_dialog = CalibrationDialog(
+            self.screen.currentData() or QApplication.primaryScreen(),
+            self.output_size.currentData(),self)
+        self.calibration_dialog.profile_ready.connect(self.use_calibration_profile)
+        self.timer.stop()
+        self.calibration_dialog.finished.connect(lambda result: self.timer.start(100))
+        self.calibration_dialog.show()
+        self.calibration_dialog.raise_()
+
+    def use_calibration_profile(self,profile):
+        self.calibration_profile = profile
+        for index in range(self.output_size.count()):
+            if self.output_size.itemData(index)==profile.screen_size:
+                self.output_size.setCurrentIndex(index)
+                break
+        if self.calibration_dialog is not None:
+            for index in range(self.screen.count()):
+                if self.screen.itemData(index)==self.calibration_dialog.capture_screen:
+                    self.screen.setCurrentIndex(index)
+                    break
+        self.update_calibration_status()
+        self.output_mode.setCurrentIndex(1)
+        self.render()
+
+    def update_calibration_status(self):
+        if self.calibration_profile is None:
+            self.calibration_status.setText("No measured profile yet. The quick layout cannot correct the curved checker cells seen in the photos.")
+        else:
+            width,height = self.calibration_profile.screen_size
+            self.calibration_status.setText(
+                f"Saved profile: {width}×{height}, {self.calibration_profile.coverage:.1%} TV coverage.")
 
     def tick(self):
-        self.timer.setInterval(250 if self.tv.isVisible() and self.layout_mode.currentIndex() else 100)
+        if self.model.currentText()=="Tiger demo":
+            self.timer.setInterval(160)
+        else:
+            self.timer.setInterval(250 if self.tv.isVisible() and self.layout_mode.currentIndex() else 100)
+        changed = False
         if self.auto_rotate.isChecked():
+            self.yaw.blockSignals(True)
             self.yaw.setValue((self.yaw.value()+1)%360)
+            self.yaw.blockSignals(False)
+            changed = True
+        if self.model.currentText()=="Tiger demo" and self.animate_model.isChecked():
+            self.animation_phase = (self.animation_phase+.16)%(2*np.pi)
+            changed = True
+        if changed:
+            self.render()
+
+    def update_model_controls(self,*args):
+        is_tiger = self.model.currentText()=="Tiger demo"
+        self.animate_model.setEnabled(is_tiger)
+        if is_tiger:
+            self.status.setText("The animated tiger is real articulated 3D geometry. Calibrate once, then every animation frame uses the saved correction.")
+        else:
+            self.status.setText("The cube and sphere are generated in the app—not repeated camera snapshots.")
 
     def turn_model(self,degrees):
         self.yaw.setValue((self.yaw.value()+degrees)%360)
@@ -414,6 +529,7 @@ class ModelPage(QWidget):
         self.storage.setValue("invert",self.invert.isChecked())
         self.storage.setValue("model_scale",self.model_scale.value())
         self.storage.setValue("model_fov",self.model_fov.value())
+        self.storage.setValue("output_size",self.output_size.currentIndex())
         self.status.setText("3D model cone fit saved on this Mac.")
 
     def reset_advanced(self):
@@ -429,5 +545,7 @@ class ModelPage(QWidget):
         self.status.setText("Advanced settings reset.")
 
     def shutdown(self):
+        if self.calibration_dialog is not None:
+            self.calibration_dialog.close()
         self.timer.stop()
         self.tv.close()

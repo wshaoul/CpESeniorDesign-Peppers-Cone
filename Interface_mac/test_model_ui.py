@@ -1,11 +1,15 @@
 import unittest
 from unittest.mock import patch
 
+import numpy as np
+
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 
 from model_studio import ModelPage
+from cone_calibration import CalibrationProfile
+from calibration_studio import CalibrationDialog
 
 
 class ModelUITests(unittest.TestCase):
@@ -31,6 +35,14 @@ class ModelUITests(unittest.TestCase):
         self.assertFalse((original==self.page.current_raw).all())
         self.page.layout_mode.setCurrentIndex(1)
         self.assertTrue(self.page.current_output.any())
+
+    def test_tiger_demo_has_animation_control(self):
+        self.page.model.setCurrentText("Tiger demo")
+        self.assertTrue(self.page.animate_model.isEnabled())
+        before = self.page.current_raw.copy()
+        self.page.animation_phase += 1
+        self.page.render()
+        self.assertFalse(np.array_equal(before,self.page.current_raw))
 
     def test_one_display_opens_windowed_output(self):
         with patch("model_studio.QApplication.screens",return_value=[QApplication.primaryScreen()]):
@@ -84,6 +96,29 @@ class ModelUITests(unittest.TestCase):
         bottom = self.page.current_output.copy()
         self.page.output_position.setCurrentText("Top")
         self.assertFalse((bottom==self.page.current_output).all())
+
+    def test_calibrated_front_mode_uses_saved_profile(self):
+        width,height = 320,180
+        map_x = np.tile(np.linspace(0,1,width,dtype=np.float32),(height,1))
+        map_y = np.tile(np.linspace(0,1,height,dtype=np.float32)[:,None],(1,width))
+        profile = CalibrationProfile(map_x,map_y,np.ones((height,width),bool),5000)
+        self.page.use_calibration_profile(profile)
+        self.assertEqual(self.page.output_mode.currentIndex(),1)
+        self.assertFalse(self.page.layout_mode.isEnabled())
+        self.assertEqual(self.page.current_output.shape,(height,width,3))
+        self.assertEqual(self.page.warp_tag.text(),"CALIBRATED FRONT VIEW")
+
+    def test_front_mode_requires_a_profile(self):
+        self.page.calibration_profile = None
+        self.page.output_mode.setCurrentIndex(1)
+        self.assertEqual(self.page.output_mode.currentIndex(),0)
+        self.assertIn("No front-audience calibration",self.page.status.text())
+
+    def test_calibration_dialog_prepares_paper_sized_sequence(self):
+        dialog = CalibrationDialog(output_size=(1920,1080),parent=self.page)
+        self.assertEqual(len(dialog.sequence),24)
+        self.assertIn("24 patterns",dialog.pattern_size.text())
+        dialog.close()
 
 
 if __name__ == "__main__":
