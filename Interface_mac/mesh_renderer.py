@@ -16,6 +16,7 @@ class RenderSettings:
     fov: float = 42
     scale: float = 1.0
     model: str = "Cube"
+    animation_phase: float = 0.0
 
 
 def checker_texture(size=512):
@@ -150,6 +151,131 @@ def _render_sphere(settings, texture):
     return canvas
 
 
+def _axis_rotation(axis, angle):
+    """Return a small local rotation used to pose the tiger parts."""
+    angle = np.deg2rad(angle)
+    cosine, sine = np.cos(angle), np.sin(angle)
+    if axis == "x":
+        return np.array([[1, 0, 0], [0, cosine, -sine],
+                         [0, sine, cosine]], np.float32)
+    if axis == "y":
+        return np.array([[cosine, 0, sine], [0, 1, 0],
+                         [-sine, 0, cosine]], np.float32)
+    return np.array([[cosine, -sine, 0], [sine, cosine, 0],
+                     [0, 0, 1]], np.float32)
+
+
+def _tiger_parts(phase):
+    """Build a stylized articulated tiger from low-poly ellipsoids.
+
+    The goal is a dependable built-in calibration subject. It is real geometry,
+    has recognizable depth cues from every side, and animates without requiring
+    an external model download.
+    """
+    step = np.sin(phase)
+    opposite = np.sin(phase + np.pi)
+    breathe = 1.0 + .035 * np.sin(phase * .5)
+    orange = np.array((35, 125, 238), np.float32)  # BGR
+    cream = np.array((190, 225, 245), np.float32)
+    black = np.array((14, 18, 24), np.float32)
+    parts = []
+
+    def add(name, center, scale, color, rotation=None, striped=False):
+        parts.append((name, np.float32(center), np.float32(scale), color,
+                      np.eye(3, dtype=np.float32) if rotation is None else rotation,
+                      striped))
+
+    add("body", (0, .05, 0), (1.28, .58*breathe, .48*breathe), orange,
+        striped=True)
+    add("chest", (-.72, .14, 0), (.55, .62, .50), orange,
+        _axis_rotation("z", -8), True)
+    add("head", (-1.18, .55, 0), (.48, .43, .42), orange,
+        _axis_rotation("z", -8), True)
+    add("muzzle", (-1.52, .48, -.02), (.25, .22, .29), cream)
+    add("ear-left", (-1.26, .91, -.25), (.17, .21, .12), orange,
+        _axis_rotation("z", -18))
+    add("ear-right", (-1.26, .91, .25), (.17, .21, .12), orange,
+        _axis_rotation("z", 18))
+    add("nose", (-1.75, .52, -.02), (.09, .07, .12), black)
+    add("eye-left", (-1.48, .69, -.26), (.055, .055, .045), black)
+    add("eye-right", (-1.48, .69, .26), (.055, .055, .045), black)
+
+    for index, (x, z, motion) in enumerate(((-.72, -.30, step),
+                                             (-.72, .30, opposite),
+                                             (.75, -.30, opposite),
+                                             (.75, .30, step))):
+        swing = 13 * motion
+        lift = .08 * max(0, motion)
+        rotation = _axis_rotation("z", swing)
+        add(f"leg-{index}", (x, -.55+lift, z), (.20, .66, .19), orange,
+            rotation, True)
+        add(f"paw-{index}", (x-.08*np.sign(motion or 1), -1.12+lift, z-.03),
+            (.30, .17, .25), orange)
+
+    tail_wave = .18 * np.sin(phase * .7)
+    previous = np.float32((1.12, .24, .18))
+    for index in range(7):
+        amount = (index+1)/7
+        point = np.float32((1.12 + .30*(index+1),
+                            .24 + .18*index + tail_wave*amount,
+                            .18 + .22*np.sin(amount*np.pi + phase*.35)))
+        center = (previous + point) * .5
+        direction = point - previous
+        angle = np.rad2deg(np.arctan2(direction[1], direction[0]))
+        add(f"tail-{index}", center, (.22, .11, .11), orange,
+            _axis_rotation("z", angle), True)
+        previous = point
+    return parts
+
+
+def _render_tiger(settings):
+    # Keep the demo responsive on a laptop CPU while the calibration warp and
+    # TV preview are also running.
+    unit_vertices, _, faces = _sphere_mesh(rows=5, columns=10)
+    triangles = []
+    global_rotation = _rotation(settings.yaw, settings.elevation)
+    light = np.array([-.35, -.65, -1], np.float32)
+    light /= np.linalg.norm(light)
+
+    for name, center, scale, base_color, local_rotation, striped in _tiger_parts(settings.animation_phase):
+        local = (unit_vertices * scale) @ local_rotation.T
+        world = local + center
+        # The articulated tail makes the tiger wider than the cube. Recenter
+        # and scale it as one subject so no viewpoint clips the head or tail.
+        world[:, 0] -= .55
+        rotated = (world @ global_rotation.T) * (settings.scale * .68)
+        z = rotated[:, 2] + 4.2
+        focal = .5 * settings.height / np.tan(np.deg2rad(settings.fov) / 2)
+        points = np.column_stack((settings.width/2 + focal*rotated[:, 0]/z,
+                                  settings.height/2 - focal*rotated[:, 1]/z)).astype(np.float32)
+        for face in faces:
+            ids = list(face)
+            a, b, c = rotated[ids]
+            normal = np.cross(b-a, c-a)
+            length = np.linalg.norm(normal)
+            if length < 1e-6:
+                continue
+            normal /= length
+            camera_vector = np.mean(rotated[ids], axis=0) + np.array([0, 0, 4.2])
+            if np.dot(normal, camera_vector) >= 0:
+                continue
+            local_center = np.mean(unit_vertices[ids], axis=0)
+            color = base_color.copy()
+            if striped:
+                band = np.sin((local_center[0]+1.15)*12 + local_center[2]*3)
+                if band > .68 and local_center[1] > -.72:
+                    color = np.array((18, 24, 32), np.float32)
+            shade = .42 + .58*abs(float(np.dot(normal, light)))
+            triangles.append((float(np.mean(z[ids])), points[ids],
+                              tuple(int(value) for value in np.clip(color*shade, 0, 255))))
+
+    canvas = np.zeros((settings.height, settings.width, 3), np.uint8)
+    for _, polygon, color in sorted(triangles, key=lambda item: item[0], reverse=True):
+        cv2.fillConvexPoly(canvas, np.round(polygon).astype(np.int32), color,
+                           cv2.LINE_AA)
+    return canvas
+
+
 def render_model(settings, texture=None):
     if settings.width < 160 or settings.height < 120:
         raise ValueError("Render size is too small")
@@ -158,6 +284,8 @@ def render_model(settings, texture=None):
         return _render_cube(settings, texture)
     if settings.model == "Sphere":
         return _render_sphere(settings, texture)
+    if settings.model == "Tiger demo":
+        return _render_tiger(settings)
     raise ValueError(f"Unknown model: {settings.model}")
 
 

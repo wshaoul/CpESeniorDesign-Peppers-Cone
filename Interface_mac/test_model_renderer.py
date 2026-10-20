@@ -12,12 +12,18 @@ class ModelRendererTests(unittest.TestCase):
     def setUp(self):
         self.settings = RenderSettings(width=480,height=270)
 
-    def test_cube_and_sphere_render_on_black(self):
-        for model in ("Cube","Sphere"):
+    def test_models_render_on_black(self):
+        for model in ("Cube","Sphere","Tiger demo"):
             image = render_model(replace(self.settings,model=model))
             self.assertEqual(image.shape,(270,480,3))
             self.assertFalse(image[0,0].any())
             self.assertTrue(image.any())
+
+    def test_tiger_animation_changes_real_geometry(self):
+        first = render_model(replace(self.settings,model="Tiger demo",animation_phase=0))
+        second = render_model(replace(self.settings,model="Tiger demo",animation_phase=1.2))
+        self.assertFalse(np.array_equal(first,second))
+        self.assertGreater(float(np.mean(np.abs(first.astype(np.int16)-second.astype(np.int16)))),.2)
 
     def test_four_views_are_not_repeated_snapshots(self):
         views = four_view_proof(self.settings)
