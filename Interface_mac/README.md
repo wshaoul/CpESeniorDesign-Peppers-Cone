@@ -59,6 +59,9 @@ builds a correction profile for the deformation caused by the reflector.
 
 In **3D Model**, press **Calibrate cone for front audience**.
 
+For an in-person team test with pass/fail criteria and the evidence to post on
+the draft PR, follow [LAB_CALIBRATION_TEST.md](LAB_CALIBRATION_TEST.md).
+
 1. Connect the TV as an extended display. Mount the iPhone at the audience's
    eye height and distance with its rear camera facing the cone.
 2. Connect the iPhone using Continuity Camera (USB recommended). Use the same
@@ -102,7 +105,9 @@ repeated views don't guarantee a better image. The external TV and physical cone
 still need testing for sharpness, alignment, and visibility from different angles.
 
 See the [test plan](research/physical_test_plan.md) and the
-[short improvement paper](research/cone_display_improvement_paper.md).
+[short improvement paper](research/cone_display_improvement_paper.md). Lab
+testers should start with the shorter
+[front-audience calibration guide](LAB_CALIBRATION_TEST.md).
 
 ## Run the tests
 
