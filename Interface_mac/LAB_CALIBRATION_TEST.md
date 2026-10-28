@@ -42,6 +42,9 @@ flowchart LR
 
 ## Get the draft
 
+PR #7 is the only PR for this calibration and tiger work. Lab testers do not
+need to open another PR.
+
 Save or commit unrelated local work before switching branches.
 
 ```bash
@@ -100,18 +103,19 @@ moved, coverage has large holes, glare hides the patterns, or correction makes
 the grid worse. Physical seam, wrinkle, or overlap artifacts should be recorded
 separately because software may not remove them.
 
-## Evidence to add to PR #7
+## After testing
 
-Post one PR comment containing:
+Add one short comment to PR #7 so the team knows whether the code worked on the
+physical setup. Attach the comparison video or pictures if available.
 
-- Tester name, date, and the output of `git rev-parse --short HEAD`.
-- Mac model/macOS version, TV resolution, iPhone model, and chosen camera number.
-- Cone measurements, marked camera distance/height, and lighting conditions.
-- A fixed-camera video showing the uncorrected grid, corrected grid, cube, and
-  animated tiger.
-- A screenshot of the distortion map and its reported coverage.
-- Result: **PASS**, **RETRY**, or **BLOCKED**, followed by the most visible issue.
+```text
+Date:
+Tester:
+Result: PASS / RETRY / BLOCKED
+Corrected grid: better / same / worse
+Cube and tiger:
+Notes:
+```
 
-Do not merge the draft PR after pattern capture alone. Merge only after the
-corrected-versus-uncorrected comparison passes and the saved cube/tiger output
-has been demonstrated.
+Keep the PR as a draft for **RETRY** or **BLOCKED**. A **PASS** means the team can
+review the result and decide whether PR #7 is ready to merge.
