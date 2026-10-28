@@ -75,6 +75,20 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(alignment_pattern(self.settings).shape,(480,640,3))
         self.assertTrue(test_card().any())
 
+    def test_antialias_reduces_false_checkerboard_detail(self):
+        with patch("projection.make_segmenter",return_value=None):
+            processor = LiveProjector()
+        checker = ((np.indices((1080,1920)).sum(axis=0)%2)*255).astype(np.uint8)
+        source = cv2.merge((checker,checker,checker))
+        settings = replace(self.settings,gain=1)
+        old = processor.process(source,replace(settings,antialias=False))
+        smooth = processor.process(source,settings)
+        mx,my = processor.maps
+        inside = (mx>100)&(mx<1800)&(my>100)&(my<900)
+        self.assertLess(float(smooth[:,:,0][inside].std()),float(old[:,:,0][inside].std())*.25)
+        self.assertFalse(smooth[0,0].any())
+        processor.close()
+
     def test_segmentation_black_and_unity_alpha(self):
         source = np.full((720,1280,3),100,np.uint8)
         class Segmenter:

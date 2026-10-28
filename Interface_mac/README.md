@@ -24,7 +24,7 @@ Privacy & Security → Camera**.
 4. Press **Escape** or **Q** to close the TV image. Click **Stop** to stop capture.
 
 The live tab shows your camera and the cone output side by side. It includes
-background removal and output-resolution options. **Smoother motion** is the
+background removal and output-resolution options. **720p output** is the
 default; the higher-resolution options may run more slowly. These options change
 the cone output resolution, not the camera's captured detail.
 
@@ -38,14 +38,45 @@ change reflection direction, or choose four, six, or eight repeated views.
 Camera `0` is usually the built-in camera. Try another number for a USB camera.
 This Mac app does not support RealSense depth capture.
 
+## Test a real 3D model
+
+Open **3D Model** to render a cube or sphere with perspective. Rotate the viewing
+angle or enable automatic rotation. **Four different angles** renders front,
+right, back, and left views from the geometry instead of repeating one image.
+You can also load an image as the model texture and send the experimental cone
+layout fullscreen to the TV.
+
+Choose **Tiger demo** to test an articulated model with walking and breathing
+motion. A saved front-audience profile is applied to each animation frame.
+
+### Calibrate the front audience view
+
+1. Connect the TV as an extended display and place the iPhone at the audience
+   position using Continuity Camera.
+2. In **3D Model**, press **Calibrate cone for front audience**, select the TV,
+   and crop the camera view to the reflection inside the cone.
+3. Capture the patterns and compare the corrected and uncorrected grids.
+4. Save the map only if the corrected grid looks better, then test the cube and
+   **Tiger demo**.
+
+Use [LAB_CALIBRATION_TEST.md](LAB_CALIBRATION_TEST.md) for the full lab setup,
+pass criteria, and results checklist.
+
+With the environment already installed, open calibration directly:
+
+```bash
+cd Interface_mac
+macenv/bin/python app.py --calibrate
+```
+
 ## What still needs testing
 
 The layouts repeat the same camera view; they aren't true 360° video. More
 repeated views don't guarantee a better image. The external TV and physical cone
 still need testing for sharpness, alignment, and visibility from different angles.
 
-See the [test plan](research/physical_test_plan.md) and the
-[short improvement paper](research/cone_display_improvement_paper.md).
+Start with the [lab calibration guide](LAB_CALIBRATION_TEST.md), then use the
+[physical test plan](research/physical_test_plan.md) for multi-angle testing.
 
 ## Run the tests
 

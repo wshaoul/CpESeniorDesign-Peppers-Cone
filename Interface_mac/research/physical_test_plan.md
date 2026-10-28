@@ -1,6 +1,14 @@
 # Physical cone test
 
-Status: not yet performed. Do not infer optical success from software tests.
+Status: the calibration-pattern sequence has been recorded on the physical cone,
+but the corrected-versus-uncorrected comparison and full acceptance test have
+not been performed. Do not infer optical success from pattern capture or
+software tests alone.
+
+Start with the shorter step-by-step
+[lab calibration guide](../LAB_CALIBRATION_TEST.md). Use this document for the
+full multi-angle, motion, latency, and stability evaluation after the initial
+front-audience corrected-versus-uncorrected comparison succeeds.
 
 Keep TV brightness, ambient lighting, viewer distance, cone placement, camera,
 and subject framing fixed. Mark twelve viewer positions every 30°. Check sector

@@ -24,6 +24,7 @@ class ProjectionSettings:
     gain: float = 1.15
     remove_background: bool = True
     portrait_crop: bool = True
+    antialias: bool = True
 
 
 def build_maps(source_shape, settings):
@@ -102,6 +103,8 @@ class LiveProjector:
         self.key = None
         self.maps = None
         self.alpha_maps = None
+        self.sample_maps = None
+        self.sample_size = None
 
     def process(self, frame, settings, segment=True):
         alpha = None
@@ -115,7 +118,24 @@ class LiveProjector:
             self.maps = build_maps(frame.shape, settings)
             self.alpha_maps = None
             self.key = key
-        warped = cv2.remap(frame, *self.maps, cv2.INTER_LINEAR,
+            h,w = frame.shape[:2]
+            side = (min(h,w) if settings.portrait_crop else max(h,w)) / settings.zoom
+            outer = min(settings.width,settings.height)*.5*settings.diameter
+            # Average fine source detail before squeezing it into a short arc.
+            # A conservative pyramid level avoids both shimmer and excess blur.
+            scale = outer*(1-settings.inner)/side
+            factor = 1
+            if settings.antialias:
+                while factor*2*scale <= 1 and min(h,w)//(factor*2)>=32:
+                    factor *= 2
+            self.sample_size = (max(1,w//factor),max(1,h//factor))
+            sw,sh = self.sample_size
+            self.sample_maps = tuple(np.where(m<0,-1,(m+.5)*ratio-.5).astype(np.float32)
+                                     for m,ratio in zip(self.maps,(sw/w,sh/h)))
+        sampled = frame
+        if self.sample_size != (frame.shape[1],frame.shape[0]):
+            sampled = cv2.resize(frame,self.sample_size,interpolation=cv2.INTER_AREA)
+        warped = cv2.remap(sampled, *self.sample_maps, cv2.INTER_LINEAR,
                           borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0))
         # Apply source-sized segmentation directly in output coordinates rather
         # than expanding a float mask over every full-resolution camera pixel.
