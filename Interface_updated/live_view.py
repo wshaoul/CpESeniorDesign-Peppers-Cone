@@ -19,6 +19,7 @@ import math
 import cv2
 from PIL import Image, ImageTk
 
+from cone_calibration import CalibrationProfile, default_profile_path, place_subject
 from mjpeg_server import MJPEGServer
 
 # Optional RealSense support
@@ -582,6 +583,7 @@ class LiveView(ttk.Frame):
 
         self._segmentor = None
         self._segmentor_initialized = False
+        self._calibration = None  # saved distortion map, set by the "Use my saved calibration" box
 
         # init
         arrange_live(self, top, controls, left, preview_card,
@@ -1024,6 +1026,72 @@ class LiveView(ttk.Frame):
             self._fs_label.image = img
             self._fs_img = img  # keep a reference
 
+    # ---------- Saved calibration ----------
+    def _toggle_calibration(self):
+        """Load (or drop) the map saved by the Calibrate tab and switch the warp to it."""
+        self._calibration = None
+        self._calibration_error = ""
+        if self.use_calibration.get():
+            path = default_profile_path()
+            try:
+                self._calibration = CalibrationProfile.load(path)
+            except FileNotFoundError:
+                self.use_calibration.set(False)
+            except Exception as exc:
+                self._calibration_error = str(exc) or exc.__class__.__name__
+                self.use_calibration.set(False)
+        self._refresh_calibration_label()
+
+    def _refresh_calibration_label(self):
+        profile = self._calibration
+        if profile is None:
+            if getattr(self, "_calibration_error", ""):
+                text = f"Couldn't read the saved calibration: {self._calibration_error}"
+            elif self.use_calibration.get():
+                text = ""
+            else:
+                saved = default_profile_path().exists()
+                text = ("Off. A saved calibration is ready to use." if saved else
+                        "No saved calibration yet. Make one in the Calibrate tab.")
+            self._calibration_label.configure(text=text)
+            return
+        width, height = profile.screen_size
+        text = f"Using your calibration: {width} × {height}, {profile.coverage:.0%} of the screen mapped."
+        index = max(0, self.display_choice.current())
+        if index < len(self._displays):
+            _, _, display_w, display_h = self._displays[index]
+            if (display_w, display_h) != (width, height):
+                text += (f" It was made for {width} × {height} but the chosen display is "
+                         f"{display_w} × {display_h}. Pick the TV you calibrated on.")
+        self._calibration_label.configure(text=text)
+
+    def _apply_calibration(self, frame_bgr, use_segmentation=True):
+        """Show the frame through the measured map instead of the polar approximation.
+
+        The map goes straight from TV pixels to the camera's view of the cone, so
+        the picture keeps its own proportions (no square crop) and the output is
+        the size of the TV the map was measured on. Black is kept truly black: the
+        polar path's contrast step lifts it to grey, which washes out a reflection.
+        """
+        image = frame_bgr
+        if use_segmentation and self.remove_background.get() and self._segmentor is not None:
+            try:
+                rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                mask = self._segmentor.process(rgb).segmentation_mask > 0.5
+                cut = np.zeros_like(image)
+                cut[mask] = image[mask]
+                image = cut
+            except Exception:
+                pass
+        # The zoom slider's default (0.6) is the polar warp's usual size; here it means "fit the view".
+        image = place_subject(image, zoom=float(self.zoom_var.get()) / 0.6,
+                              mirror=self.mirror_var.get())
+        output = self._calibration.apply(image)
+        gain = float(self.gain_var.get())
+        if gain != 1.0:
+            output = cv2.LUT(output, np.clip(np.arange(256) * gain, 0, 255).astype(np.uint8))
+        return output
+
     # ---------- Warp Display ----------
     def _apply_warp(self, frame_bgr, use_segmentation=True):
         """
@@ -1035,7 +1103,12 @@ class LiveView(ttk.Frame):
         - center/scale subject (configurable zoom)
         - remap with precomputed circular-cone maps
         - saturation/contrast/gain enhancement
+
+        With "Use my saved calibration" on, the measured map replaces steps 1-5.
         """
+        if self._calibration is not None:
+            return self._apply_calibration(frame_bgr, use_segmentation)
+
         # 1) square input — crop-to-square (default) avoids squashing a 16:9
         # webcam frame the way a plain resize-to-square would.
         fitted = to_square(frame_bgr, crop_to_square=self.crop_square_var.get())
