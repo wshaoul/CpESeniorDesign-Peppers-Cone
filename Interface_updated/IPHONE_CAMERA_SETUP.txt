@@ -1,0 +1,75 @@
+USING AN IPHONE AS THE CAMERA (WINDOWS)
+=======================================
+
+Windows has no Continuity Camera, so we use Camo to make the iPhone show
+up as a normal webcam that Live Studio can open.
+
+1. INSTALL CAMO
+   - iPhone: install "Camo" from the App Store.
+   - PC: install "Camo Studio" from https://reincubate.com/camo/
+   - Connect the iPhone to the PC with a USB cable (more reliable than Wi-Fi).
+   - Open Camo on the iPhone and Camo Studio on the PC. Camo Studio should
+     show the iPhone's live video. Select the iPhone as the source if needed.
+
+2. KEEP CAMO RUNNING
+   - Leave the Camo app open in the foreground on the iPhone, screen unlocked.
+     Camo pauses when the app is backgrounded or the phone locks.
+   - Close other apps that might be using Camo (Zoom, Discord, browser tabs).
+   - A crossed-out-eye image means Camo is paused.
+
+3. SELECT IT IN LIVE STUDIO
+   - Start the app from Interface_updated:
+         winvenv310\Scripts\python.exe studio_main.py
+   - Click "Calibrate Cone" (top-right of the home page).
+   - Set "Index" to the Camo camera and click "Start Camera".
+       * Camo is usually index 1; the laptop webcam is usually index 0.
+         The numbers depend on which cameras are connected, so if you see the
+         wrong camera, click "Stop Camera", change the index, and try again.
+   - If the preview stays black or shows an error, change "Backend" to
+     "DSHOW (DirectShow)" and start the camera again.
+
+4. TIPS FOR CALIBRATION
+   - Hold or mount the iPhone in LANDSCAPE. Portrait wastes most of the image
+     in black side bars.
+   - Mount it at the audience's eye height and distance, facing the cone,
+     and do not move it during or after calibration.
+   - Turn off Camo effects (background blur, auto-framing, filters). Lock
+     exposure, focus and white balance in Camo Studio if available.
+   - Keep the Camo logo (bottom-right corner) outside the yellow box.
+   - Our test feed was 1280x720, which is enough to calibrate.
+
+
+NO CABLE? RECORD NOW, CALIBRATE LATER
+=====================================
+
+If the phone is too far from the PC for USB (and Camo over Wi-Fi is blocked,
+as on eduroam), record the patterns with the phone's normal Camera app and
+load the video afterwards. Camo is not needed for this.
+
+1. SET UP THE PHONE
+   - Tripod at the audience's eye height and distance, LANDSCAPE, facing the
+     cone. Don't touch it again until the recording is done.
+   - Camera app > Video, 1080p at 30 fps is plenty (Settings > Camera >
+     Record Video).
+   - Press and hold on the cone reflection until "AE/AF LOCK" appears, so
+     exposure and focus don't change when the TV goes black.
+   - Dim the room lights.
+
+2. PLAY AND RECORD
+   - In Live Studio, open the Calibrate tab and pick the TV under "Display".
+   - Under "Record now, calibrate later", set "Black lead-in" long enough to
+     walk to the phone (default 10 s).
+   - Click "Play for Recording". The TV goes black: start recording now.
+     The green, magenta and striped patterns play next (about 40 s).
+   - Keep recording until the TV goes black again, then stop.
+
+3. LOAD AND BUILD
+   - Copy the video to the PC (AirDrop isn't on Windows: use iCloud Photos,
+     a USB cable afterwards, or Google Drive/OneDrive).
+   - Click "Load Recording..." with the SAME display still selected. The app
+     finds the patterns by itself and shows the solid green frame.
+   - Drag the yellow box around the cone reflection only, then "Build Map".
+   - Use "Grid with correction" and look at the cone from the phone's spot
+     to check it, then "Save profile".
+   - If the video won't open, set Settings > Camera > Formats > Most
+     Compatible on the iPhone and record again.

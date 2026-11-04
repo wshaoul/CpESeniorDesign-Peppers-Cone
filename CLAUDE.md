@@ -35,8 +35,8 @@ The app degrades gracefully when optional deps are missing — RealSense option 
 
 ## Architecture
 
-### Multi-page Tkinter router
-`studio_main.py` hosts a stack of `ttk.Frame` subclasses. `controller.show_page(name)` raises the requested page. Pages declare `start_async()` for background init. The same pattern is used in `studio_circle.py`.
+### Tabbed studio shell (`studio_theme.py`)
+`studio_main.py` and `studio_circle.py` are thin wrappers around `StudioApp(circle=...)`, which draws the header, the rounded Live / Record / Upload (/ Calibrate, Windows edition only) tab buttons, and lazily imports each page from `StudioApp.specs` on first selection; a page that fails to construct shows an error panel with Retry instead of crashing the app. `controller.show_page(name)` switches tabs (`"HomePage"` maps to Live) and calls the outgoing page's optional `on_hide()` so it can release hardware. Pages use the shared `ScrollPanel` (left controls) and `Card` (right preview) widgets plus the `Primary.TButton` / `TV.TButton` / `Shell.TFrame` styles defined there.
 
 ### Core warp pipeline (`live_view.py`)
 `build_cone_maps(frame_size, canvas_size, span_deg, rotate_deg, r_inner_frac, r_outer_frac, center_frac)` → `(map_x, map_y)` float32 arrays for `cv2.remap()`. It maps each canvas pixel to a source-frame pixel by computing polar coordinates and fitting them into the arc band. Key defaults:
@@ -66,11 +66,14 @@ The app enumerates DirectShow devices via `ffmpeg -list_devices` on Windows and 
 
 | File | Role |
 |------|------|
-| `Interface_updated/studio_main.py` | Entry point, page router, HomePage dashboard |
+| `Interface_updated/studio_main.py` | Entry point (Windows edition) |
+| `Interface_updated/studio_theme.py` | Shared palette, rounded widgets, tab shell (`StudioApp`) |
 | `Interface_updated/live_view.py` | Core warp algorithm, live camera, segmentation, sliders |
 | `Interface_updated/live_view_circle.py` | Four-face 360° variant of the warp pipeline |
 | `Interface_updated/record_view.py` | Record raw feed → play back through warp |
 | `Interface_updated/upload_view.py` | Load existing video → play through warp |
+| `Interface_updated/calibration_view.py` | Green/magenta Gray-code cone calibration page (Windows port of Mac calibration studio) |
+| `Interface_updated/cone_calibration.py` | Calibration pattern generation, decoding, and distortion-profile math (shared with `Interface_mac`) |
 | `Interface_updated/studio_circle.py` | Router for circle hologram app |
 | `Interface_updated/realsense_live.py` | Standalone RealSense viewer with warp |
 | `Interface_updated/realsense_test.py` | Hardware diagnostic for RealSense camera |
