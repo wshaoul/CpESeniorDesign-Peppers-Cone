@@ -5,13 +5,15 @@
 # - A camera at the audience position records how the cone bends each pattern
 # - Decodes the reflection into a TV -> viewer distortion map (cone_calibration.py)
 # - Compare grids with and without correction, then save the profile
+# - Or: play the patterns with no camera attached, record them on a phone,
+#   and decode the video afterwards ("record now, calibrate later")
 
 import os
 import time
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 import numpy as np
 import cv2
@@ -37,6 +39,162 @@ BACKENDS = [
 def default_profile_path():
     root = Path(os.environ.get("APPDATA", Path.home())) / "PeppersCone"
     return root / "front_audience_calibration.npz"
+
+
+# ---------- Recorded calibration ----------
+TAIL_SECONDS = 3           # black after the last pattern; marks the end of the sequence
+RECORDING_MAX_WIDTH = 1920  # 4K phone video is downscaled to keep 24 stored frames small
+RECORDING_SAMPLES = 5      # frames median-combined per pattern
+
+
+def frame_signals(frame):
+    """Whole-frame brightness and green-vs-magenta balance, cheap enough for every frame."""
+    small = cv2.resize(frame, (160, 90), interpolation=cv2.INTER_AREA).astype(np.float32)
+    b, g, r = (small[:, :, c].mean() for c in range(3))
+    return (b + g + r) / 3, g - (b + r) / 2
+
+
+def find_pattern_run(times, levels, greens, count):
+    """Locate the played sequence in a recording.
+
+    The green reference is the greenest moment in the video; the sequence ends
+    when the frame drops back to black. Returns (start, period) in seconds.
+    """
+    times = np.asarray(times, float)
+    levels = np.asarray(levels, float)
+    greens = np.asarray(greens, float)
+    peak = int(np.argmax(greens))
+    if greens[peak] < 3:
+        raise ValueError("No green reference frame found. Make sure the cone reflection is in the shot.")
+    onset = peak
+    while onset > 0 and greens[onset - 1] >= greens[peak] / 2:
+        onset -= 1
+    start = times[onset]
+
+    before = levels[(times >= start - 1.0) & (times < start - 0.15)]
+    if before.size == 0:
+        raise ValueError("Start recording a few seconds before the TV turns green.")
+    during = levels[(times >= start + 0.1) & (times < start + 0.3)]
+    if during.size == 0:
+        during = levels[onset:onset + 1]
+    dark, bright = np.median(before), np.median(during)
+    if bright - dark < 2:
+        raise ValueError("The TV turning on and off is barely visible in the video. "
+                         "Dim the room and lock the phone's exposure.")
+    threshold = (dark + bright) / 2
+
+    # Patterns never go black, so the first sustained dark stretch is the tail.
+    end = None
+    for k in range(onset + 1, len(times)):
+        if levels[k] < threshold:
+            window = (times >= times[k]) & (times < times[k] + 0.4)
+            if np.all(levels[window] < threshold):
+                end = times[k]
+                break
+    if end is None:
+        raise ValueError("The recording stops before the patterns finished. "
+                         "Keep recording until the TV goes black again.")
+    period = (end - start) / count
+    if not 0.3 <= period <= 6:
+        raise ValueError(f"Found {period:.2f} s per pattern, which doesn't look like the played sequence. "
+                         "Check that the selected display matches the TV the patterns were played on.")
+
+    magenta = (times >= start + 1.25 * period) & (times <= start + 1.75 * period)
+    if not magenta.any() or np.median(greens[magenta]) >= 0:
+        raise ValueError("The pattern timing didn't line up (no magenta after green). Record again.")
+    return start, period
+
+
+def read_recording(path, count, report=lambda message, fraction: None):
+    """Two passes over the video: find the pattern timing, then median-sample each pattern."""
+    def open_video():
+        cap = cv2.VideoCapture(str(path))
+        if not cap.isOpened():
+            raise RuntimeError("Could not open the video. On the iPhone, try Settings > Camera > "
+                               "Formats > Most Compatible, then record again.")
+        return cap
+
+    cap = open_video()
+    total = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    times, levels, greens = [], [], []
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            times.append(cap.get(cv2.CAP_PROP_POS_MSEC) / 1000)
+            level, green = frame_signals(frame)
+            levels.append(level)
+            greens.append(green)
+            if len(times) % 30 == 0:
+                report(f"Scanning video… {len(times)}/{total} frames", 0.7 * min(1, len(times) / total))
+    finally:
+        cap.release()
+    if len(times) < 2:
+        raise RuntimeError("The video has no readable frames.")
+    times = np.asarray(times)
+    if np.any(np.diff(times) <= 0):
+        times = np.arange(len(times)) / fps  # container without usable timestamps
+
+    start, period = find_pattern_run(times, levels, greens, count)
+
+    # Sample the middle half of each pattern, away from the switch-over.
+    wanted = {}
+    for i in range(count):
+        a, b = start + (i + 0.25) * period, start + (i + 0.75) * period
+        idx = np.nonzero((times >= a) & (times <= b))[0]
+        if idx.size == 0:
+            raise ValueError(f"No video frames landed on pattern {i + 1}. Record at 30 fps or "
+                             "raise the seconds per pattern.")
+        picks = idx[np.linspace(0, idx.size - 1, min(RECORDING_SAMPLES, idx.size)).round().astype(int)]
+        for k in picks:
+            wanted[int(k)] = i
+
+    samples = [[] for _ in range(count)]
+    last = max(wanted)
+    cap = open_video()
+    try:
+        for k in range(last + 1):
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if k in wanted:
+                h, w = frame.shape[:2]
+                if w > RECORDING_MAX_WIDTH:
+                    frame = cv2.resize(frame, (RECORDING_MAX_WIDTH, round(h * RECORDING_MAX_WIDTH / w)),
+                                       interpolation=cv2.INTER_AREA)
+                samples[wanted[k]].append(frame)
+            if k % 30 == 0:
+                report("Collecting pattern frames…", 0.7 + 0.3 * k / (last + 1))
+    finally:
+        cap.release()
+    if any(not s for s in samples):
+        raise RuntimeError("The video ended early while collecting pattern frames.")
+    return [np.median(np.stack(s), axis=0).astype(np.uint8) for s in samples], period
+
+
+class RecordingAnalysis:
+    """Runs read_recording off the UI thread; the page polls message/fraction/result."""
+
+    def __init__(self, path, count, screen_size):
+        self.path = path
+        self.count = count
+        self.screen_size = screen_size
+        self.message = "Opening video…"
+        self.fraction = 0.0
+        self.result = None
+        self.error = ""
+        self.thread = threading.Thread(target=self.run, daemon=True)
+
+    def run(self):
+        try:
+            self.result = read_recording(self.path, self.count, self._report)
+        except Exception as exc:
+            self.error = str(exc) or exc.__class__.__name__
+
+    def _report(self, message, fraction):
+        self.message, self.fraction = message, fraction
 
 
 # ---------- Display enumeration ----------
@@ -207,6 +365,12 @@ class CalibrationView(ttk.Frame):
         self._capture_monitor = None
         self._profile = None
 
+        # Record-now-calibrate-later state
+        self._playback = None       # (started, steps, sequence) while playing for a phone recording
+        self._playback_id = None
+        self._analysis = None
+        self._recording = None      # {"frames": [...], "size": (w, h)} once a video is decoded
+
         # Preview state: ROI is normalized (x1, y1, x2, y2) in camera-frame coordinates
         self._roi = (0.2, 0.05, 0.8, 0.78)
         self._drag_start = None
@@ -242,8 +406,8 @@ class CalibrationView(ttk.Frame):
             "1. Connect the TV as an extended display (Win+P > Extend), not duplicated.\n"
             "2. Mount the camera at the audience's eye height and distance, facing the cone. "
             "Turn off auto-framing / background effects.\n"
-            "3. Start the camera, then drag a box around the cone reflection only; "
-            "exclude the visible TV below it.\n"
+            "3. Start the camera (or load a recording), then drag a box around the cone "
+            "reflection only; exclude the visible TV below it.\n"
             "4. Dim the room lights and keep the camera and cone still during capture."
         )).pack(anchor="w")
 
@@ -287,6 +451,29 @@ class CalibrationView(ttk.Frame):
         self.btn_cancel = ttk.Button(left, text="Cancel / Hide TV", style="TV.TButton", command=self._cancel_output)
         self.btn_cancel.pack(anchor="w", pady=(8, 0))
 
+        # --- Record now, calibrate later ---
+        rec_box = ttk.LabelFrame(left, text="Record now, calibrate later")
+        rec_box.pack(fill="x", pady=(12, 0))
+        ttk.Label(rec_box, wraplength=340, justify="left", text=(
+            "No cable to the phone? Start recording with the phone's Camera app, click Play, "
+            "and keep recording until the TV goes black. Then copy the video here and load it."
+        )).grid(row=0, column=0, columnspan=3, padx=8, pady=(8, 6), sticky="w")
+        ttk.Label(rec_box, text="Black lead-in (s):").grid(row=1, column=0, padx=(8, 6), pady=(0, 8), sticky="w")
+        self.lead_var = tk.IntVar(value=10)
+        self.lead_spin = ttk.Spinbox(rec_box, from_=3, to=30, increment=1, width=5,
+                                     textvariable=self.lead_var, state="readonly")
+        self.lead_spin.grid(row=1, column=1, sticky="w", pady=(0, 8))
+        rec_actions = ttk.Frame(rec_box)
+        rec_actions.grid(row=2, column=0, columnspan=3, padx=8, pady=(0, 8), sticky="w")
+        self.btn_play = ttk.Button(rec_actions, text="Play for Recording", style="TV.TButton",
+                                   command=self._play_for_recording)
+        self.btn_load = ttk.Button(rec_actions, text="Load Recording…", command=self._load_recording)
+        self.btn_build = ttk.Button(rec_actions, text="Build Map", style="Primary.TButton",
+                                    command=self._build_from_recording, state="disabled")
+        self.btn_play.pack(side="left")
+        self.btn_load.pack(side="left", padx=6)
+        self.btn_build.pack(side="left")
+
         # --- Verification ---
         verify = ttk.LabelFrame(left, text="Verify")
         verify.pack(fill="x", pady=(12, 0))
@@ -311,7 +498,7 @@ class CalibrationView(ttk.Frame):
 
         self.canvas = tk.Canvas(self.tabs, width=PREVIEW_W, height=PREVIEW_H, bg="#0f172a", highlightthickness=0)
         self.canvas.create_text(PREVIEW_W // 2, PREVIEW_H // 2, fill="#9aa7bc",
-                                text="Start the camera, then drag a box around only the cone reflection.")
+                                text="Start the camera or load a recording, then drag a box around only the cone reflection.")
         self.canvas.bind("<ButtonPress-1>", self._on_roi_press)
         self.canvas.bind("<B1-Motion>", self._on_roi_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_roi_release)
@@ -393,6 +580,10 @@ class CalibrationView(ttk.Frame):
         self.cam_index.config(state="readonly")
         self.backend_combo.config(state="readonly")
         self.btn_capture.config(state="disabled")
+        if self._recording is not None:
+            # Fall back to the loaded recording's still so its box can still be edited.
+            self._latest_frame = self._recording["frames"][0]
+            self._draw_preview(self._latest_frame)
 
     def _tick(self):
         self._tick_id = None
@@ -502,10 +693,7 @@ class CalibrationView(ttk.Frame):
         if time.monotonic() - self._last_frame_time > 1:
             self.status.set("Status: wait for a fresh camera preview before starting.")
             return
-        if len(self._monitors) < 2 and not messagebox.askokcancel(
-                "Calibration",
-                "Only one display is connected, so the patterns will cover this screen.\n\n"
-                "Press Esc or Q to stop them early. Continue?"):
+        if not self._confirm_output():
             return
         x1, y1, x2, y2 = self._roi_pixels(self._latest_frame.shape)
         if x2 - x1 < 40 or y2 - y1 < 40:
@@ -533,7 +721,7 @@ class CalibrationView(ttk.Frame):
         if self._pattern_index < 0:
             return
         if self._pattern_index >= len(self._sequence):
-            self._finish_calibration()
+            self._finish_calibration(self._captured_frames, (self._sequence.width, self._sequence.height))
             return
         self._pattern_win.set_frame(self._sequence.frame(self._pattern_index))
         self._pattern_started = time.monotonic()
@@ -549,13 +737,13 @@ class CalibrationView(ttk.Frame):
         self.progress.config(value=self._pattern_index)
         self._show_pattern()
 
-    def _finish_calibration(self):
+    def _finish_calibration(self, frames, size):
+        """Decode ROI-cropped pattern frames (live or recorded) into a profile."""
         self._pattern_win.hide()
         self.status.set("Status: building and smoothing the distortion map…")
         self.update_idletasks()
-        size = (self._sequence.width, self._sequence.height)
         try:
-            screen_x, screen_y, valid = decode_sequence(self._captured_frames, size)
+            screen_x, screen_y, valid = decode_sequence(frames, size)
             profile = build_profile(screen_x, screen_y, valid, size)
             if profile.coverage < 0.01:
                 raise ValueError("Too little of the TV reflection was decoded. Tighten the box around "
@@ -580,6 +768,7 @@ class CalibrationView(ttk.Frame):
         self._set_verify_enabled(True)
 
     def _abort_calibration(self, message):
+        self._stop_playback()
         self._pattern_win.hide()
         self._pattern_index = -1
         self._captured_frames = []
@@ -589,22 +778,149 @@ class CalibrationView(ttk.Frame):
         self.status.set(f"Status: {message}")
 
     def _cancel_output(self):
-        if self._pattern_index >= 0 or self._pattern_win.is_visible():
+        if self._pattern_index >= 0 or self._playback is not None or self._pattern_win.is_visible():
             self._abort_calibration("TV output hidden. Any unfinished capture was cancelled; "
                                     "the saved profile was not changed.")
+
+    def _confirm_output(self):
+        return len(self._monitors) > 1 or messagebox.askokcancel(
+            "Calibration",
+            "Only one display is connected, so the patterns will cover this screen.\n\n"
+            "Press Esc or Q to stop them early. Continue?")
 
     def _set_setup_enabled(self, enabled):
         state = "normal" if enabled else "disabled"
         self.btn_camera.config(state=state)
         self.btn_refresh.config(state=state)
+        self.btn_play.config(state=state)
+        self.btn_load.config(state=state)
+        self.btn_build.config(state="normal" if enabled and self._recording is not None else "disabled")
         self.display_combo.config(state="readonly" if enabled else "disabled")
         self.settle_spin.config(state="readonly" if enabled else "disabled")
+        self.lead_spin.config(state="readonly" if enabled else "disabled")
         if not enabled:
             self.btn_capture.config(state="disabled")
 
     def _set_verify_enabled(self, enabled):
         for btn in (self.btn_plain, self.btn_corrected, self.btn_save):
             btn.config(state="normal" if enabled else "disabled")
+
+    # ---------- Record now, calibrate later ----------
+    def _lead_in_seconds(self):
+        try:
+            return min(30, max(3, int(self.lead_var.get())))
+        except (tk.TclError, ValueError):
+            return 10
+
+    def _play_for_recording(self):
+        """Play black, the full sequence on a fixed clock, then black, for a phone to record."""
+        if self._pattern_index >= 0 or self._playback is not None or not self._confirm_output():
+            return
+        monitor = self._selected_monitor()
+        _, _, _, w, h = monitor
+        sequence = CalibrationSequence(w, h)
+        lead_in, hold = self._lead_in_seconds(), self._settle_seconds()
+        # (seconds after Play, pattern index); -1 = black, None = done
+        steps = [(0, -1)] + [(lead_in + i * hold, i) for i in range(len(sequence))]
+        steps += [(lead_in + len(sequence) * hold, -1), (lead_in + len(sequence) * hold + TAIL_SECONDS, None)]
+
+        self._capture_monitor = monitor
+        self._set_setup_enabled(False)
+        self.progress.config(maximum=len(sequence), value=0)
+        self._pattern_win.open_on(monitor)
+        self._playback = (time.monotonic(), steps, sequence)
+        self._play_step(0)
+
+    def _play_step(self, index):
+        self._playback_id = None
+        if self._playback is None:
+            return
+        started, steps, sequence = self._playback
+        pattern = steps[index][1]
+        if pattern is None:
+            self._abort_calibration(
+                "Done. Stop the phone recording, copy the video to this PC, then click Load Recording… "
+                "with this same display selected.")
+            self.progress.config(value=0)
+            return
+        if pattern < 0:
+            _, _, _, w, h = self._capture_monitor
+            self._pattern_win.set_frame(np.zeros((h, w, 3), np.uint8))
+            if index == 0:
+                self.status.set(f"Status: TV is black for {self._lead_in_seconds()} s. Make sure the phone "
+                                "is recording; patterns start after that.")
+            else:
+                self.status.set("Status: last pattern shown. Keep recording until this finishes.")
+        else:
+            self._pattern_win.set_frame(sequence.frame(pattern))
+            self.progress.config(value=pattern + 1)
+            self.status.set(f"Status: playing {pattern + 1}/{len(sequence)}: {sequence.label(pattern)}. "
+                            "Keep the phone still and recording.")
+        # Schedule against the start time so per-step delays don't accumulate.
+        delay = started + steps[index + 1][0] - time.monotonic()
+        self._playback_id = self.after(max(1, int(delay * 1000)), lambda: self._play_step(index + 1))
+
+    def _stop_playback(self):
+        if self._playback_id is not None:
+            self.after_cancel(self._playback_id)
+            self._playback_id = None
+        self._playback = None
+
+    def _load_recording(self):
+        path = filedialog.askopenfilename(
+            title="Choose the calibration recording",
+            filetypes=[("Videos", "*.mov *.mp4 *.m4v *.avi"), ("All files", "*.*")])
+        if not path:
+            return
+        self._stop_camera()
+        _, _, _, w, h = self._selected_monitor()
+        self._analysis = RecordingAnalysis(path, len(CalibrationSequence(w, h)), (w, h))
+        self._analysis.thread.start()
+        self._set_setup_enabled(False)
+        self.progress.config(maximum=100, value=0)
+        self._poll_analysis()
+
+    def _poll_analysis(self):
+        analysis = self._analysis
+        if analysis is None:
+            return
+        if analysis.thread.is_alive():
+            self.progress.config(value=analysis.fraction * 100)
+            self.status.set(f"Status: {analysis.message}")
+            self.after(100, self._poll_analysis)
+            return
+        self._analysis = None
+        self.progress.config(value=0)
+        if analysis.error:
+            self._set_setup_enabled(True)
+            self.status.set(f"Status: {analysis.error}")
+            return
+
+        frames, period = analysis.result
+        w, h = analysis.screen_size
+        self._recording = {"frames": frames, "size": (w, h)}
+        self._profile = None
+        self.map_label.config(image="", text="Build the map to see the measured distortion map.")
+        self._set_verify_enabled(False)
+        self._set_setup_enabled(True)
+        self._latest_frame = frames[0]  # green reference: the reflection shows up clearly
+        self._draw_preview(self._latest_frame)
+        self.tabs.select(0)
+        self.status.set(f"Status: found all {len(frames)} patterns ({period:.2f} s each, decoding for "
+                        f"{w} x {h}). The green frame shows the reflection; drag the box around the "
+                        "cone reflection only, then click Build Map.")
+
+    def _build_from_recording(self):
+        if self._recording is None:
+            return
+        frames = self._recording["frames"]
+        x1, y1, x2, y2 = self._roi_pixels(frames[0].shape)
+        if x2 - x1 < 40 or y2 - y1 < 40:
+            self.status.set("Status: draw a larger box around the cone reflection.")
+            return
+        self._capture_roi = (x1, y1, x2, y2)
+        self._capture_monitor = self._selected_monitor()
+        self._finish_calibration([f[y1:y2, x1:x2] for f in frames], self._recording["size"])
 
     # ---------- Verify / save ----------
     def _show_grid(self, corrected):

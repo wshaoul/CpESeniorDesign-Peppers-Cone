@@ -37,3 +37,39 @@ up as a normal webcam that Live Studio can open.
      exposure, focus and white balance in Camo Studio if available.
    - Keep the Camo logo (bottom-right corner) outside the yellow box.
    - Our test feed was 1280x720, which is enough to calibrate.
+
+
+NO CABLE? RECORD NOW, CALIBRATE LATER
+=====================================
+
+If the phone is too far from the PC for USB (and Camo over Wi-Fi is blocked,
+as on eduroam), record the patterns with the phone's normal Camera app and
+load the video afterwards. Camo is not needed for this.
+
+1. SET UP THE PHONE
+   - Tripod at the audience's eye height and distance, LANDSCAPE, facing the
+     cone. Don't touch it again until the recording is done.
+   - Camera app > Video, 1080p at 30 fps is plenty (Settings > Camera >
+     Record Video).
+   - Press and hold on the cone reflection until "AE/AF LOCK" appears, so
+     exposure and focus don't change when the TV goes black.
+   - Dim the room lights.
+
+2. PLAY AND RECORD
+   - In Live Studio, open the Calibrate tab and pick the TV under "Display".
+   - Under "Record now, calibrate later", set "Black lead-in" long enough to
+     walk to the phone (default 10 s).
+   - Click "Play for Recording". The TV goes black: start recording now.
+     The green, magenta and striped patterns play next (about 40 s).
+   - Keep recording until the TV goes black again, then stop.
+
+3. LOAD AND BUILD
+   - Copy the video to the PC (AirDrop isn't on Windows: use iCloud Photos,
+     a USB cable afterwards, or Google Drive/OneDrive).
+   - Click "Load Recording..." with the SAME display still selected. The app
+     finds the patterns by itself and shows the solid green frame.
+   - Drag the yellow box around the cone reflection only, then "Build Map".
+   - Use "Grid with correction" and look at the cone from the phone's spot
+     to check it, then "Save profile".
+   - If the video won't open, set Settings > Camera > Formats > Most
+     Compatible on the iPhone and record again.
