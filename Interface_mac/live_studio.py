@@ -216,6 +216,9 @@ class LivePage(QWidget):
         self.calibration_profile = None
         self.calibration_path = default_profile_path()
         self.calibration_dialog = None
+        self._smoothed_source = None
+        self._smoothed_sigma = None
+        self._smoothed_profile = None
         self.sequence = -1
         self.fullscreen = TVWindow()
         self.storage = QSettings("PeppersCone","MacLiveStudio")
@@ -277,6 +280,13 @@ class LivePage(QWidget):
         self.use_calibration = QCheckBox("Use my saved calibration")
         self.use_calibration.toggled.connect(self.toggle_calibration)
         form.addRow(self.use_calibration)
+        self.map_smoothing = QComboBox()
+        for label, sigma in (("Off — original map", 0), ("Light", 8), ("Medium", 16), ("Strong", 24)):
+            self.map_smoothing.addItem(label, sigma)
+        self.map_smoothing.setCurrentIndex(2)
+        self.map_smoothing.setEnabled(False)
+        self.map_smoothing.setToolTip("Smooth map coordinates without blurring the camera frame. Choose Off to compare with the original map.")
+        form.addRow("Map smoothing", self.map_smoothing)
         self.calibration_label = QLabel("Make a map or load one from the lab to test calibrated live output.")
         self.calibration_label.setWordWrap(True)
         self.calibration_label.setObjectName("tip")
@@ -404,6 +414,7 @@ class LivePage(QWidget):
         self.mode.currentIndexChanged.connect(self.source_changed)
         self.resolution.currentIndexChanged.connect(self.source_changed)
         self.camera_index.valueChanged.connect(self.source_changed)
+        self.map_smoothing.currentIndexChanged.connect(self.update_settings)
 
     def open_calibration(self):
         if not self.stop():
@@ -454,6 +465,7 @@ class LivePage(QWidget):
 
     def refresh_calibration_controls(self):
         active = self.use_calibration.isChecked() and self.calibration_profile is not None
+        self.map_smoothing.setEnabled(active)
         for widget in (self.views, self.quality, self.invert, self.portrait_crop, self.antialias):
             widget.setEnabled(not active)
         for name, spin in self.spins.items():
@@ -471,6 +483,18 @@ class LivePage(QWidget):
             self.calibration_label.setText(text)
         else:
             self.calibration_label.setText("Calibration off. Make a map or load a saved .npz from the lab.")
+
+    def active_calibration(self):
+        if not self.use_calibration.isChecked() or self.calibration_profile is None:
+            return None
+        source = self.calibration_profile
+        sigma = self.map_smoothing.currentData()
+        if not sigma:
+            return source
+        if self._smoothed_source is not source or self._smoothed_sigma != sigma:
+            self._smoothed_profile = source.smoothed(sigma)
+            self._smoothed_source, self._smoothed_sigma = source, sigma
+        return self._smoothed_profile
 
     def toggle_advanced(self,visible):
         self.advanced_panel.setVisible(visible)
@@ -501,7 +525,7 @@ class LivePage(QWidget):
         values = {name:spin.value() for name,spin in self.spins.items()}
         for name in ("diameter","inner","center_x","center_y","zoom"):
             values[name] /= 100
-        profile = self.calibration_profile if self.use_calibration.isChecked() else None
+        profile = self.active_calibration()
         if profile is not None:
             w, h = profile.screen_size
         return ProjectionSettings(width=w,height=h,views=self.views.currentData(),calibration=profile,

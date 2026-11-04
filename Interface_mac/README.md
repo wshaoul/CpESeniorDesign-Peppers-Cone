@@ -55,6 +55,14 @@ map…** imports it directly. The mapped output uses the profile's TV resolution
 subject size, mirroring and brightness still work. The other polar-layout
 controls are disabled while the map is active.
 
+**Map smoothing** defaults to **Medium** in Live. It reduces abrupt coordinate
+steps left by coarse calibration cells, while retaining the original support
+mask and saved file. Choose **Off — original map** to compare with Will's
+baseline, or try **Light** and **Strong** with the camera running. The smoothing
+is prepared once per map/setting; it does not blur each camera frame or restart
+capture. Check a fixed-view grid and portrait before choosing a strength.
+Missing measurements and reflector wrinkles still require a physical check.
+
 To make a new phone recording on Mac, use **Play for recording** with the TV
 connected as an extended display. Keep recording through the black lead-in,
 all patterns and the final black tail. Load the original phone file when possible.

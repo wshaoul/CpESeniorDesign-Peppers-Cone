@@ -121,6 +121,38 @@ class LiveCalibrationUITests(unittest.TestCase):
         self.page.use_calibration_profile(profile())
         self.assertTrue(self.page.use_calibration.isChecked())
 
+    def test_map_smoothing_can_be_compared_to_the_original_without_reloading(self):
+        self.page.load_calibration(str(self.path))
+        original = self.page.calibration_profile
+        self.assertTrue(self.page.map_smoothing.isEnabled())
+        first = self.page.settings().calibration
+        self.assertIsNot(first, original)
+        self.assertIs(self.page.settings().calibration, first)
+        np.testing.assert_array_equal(first.valid, original.valid)
+        self.page.map_smoothing.setCurrentIndex(0)
+        self.assertIs(self.page.settings().calibration, original)
+        self.page.map_smoothing.setCurrentIndex(1)
+        light = self.page.settings().calibration
+        self.assertIsNot(light, first)
+        self.assertIs(self.page.settings().calibration, light)
+        self.page.use_calibration.setChecked(False)
+        self.assertFalse(self.page.map_smoothing.isEnabled())
+        self.assertIsNone(self.page.settings().calibration)
+        # The disk profile remains the original map for future comparisons.
+        loaded = CalibrationProfile.load(self.path)
+        np.testing.assert_array_equal(loaded.map_x, original.map_x)
+
+    def test_smoothing_updates_a_running_worker_without_restarting_capture(self):
+        self.page.load_calibration(str(self.path))
+        updates = []
+        self.page.worker = SimpleNamespace(update=lambda settings, mode: updates.append(settings),
+                                            stop=lambda: True)
+        self.page.map_smoothing.setCurrentIndex(0)
+        self.assertIs(updates[-1].calibration, self.page.calibration_profile)
+        self.page.map_smoothing.setCurrentIndex(3)
+        self.assertIsNot(updates[-1].calibration, self.page.calibration_profile)
+        self.page.worker = None
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -211,6 +211,31 @@ class CalibrationProfile:
     def coverage(self):
         return float(np.count_nonzero(self.valid) / self.valid.size)
 
+    def smoothed(self, sigma=16):
+        """Reduce jumps in TV-to-source coordinates, retaining measured support.
+
+        Coarse decoded cells can leave plateaus after the sparse-map splat.
+        Smooth the coordinate field once, with normalized weights so black
+        unsupported pixels cannot pull valid coordinates toward (0, 0).
+        The source image and support mask are unchanged.
+        """
+        sigma = float(sigma)
+        if not np.isfinite(sigma) or sigma < 0 or sigma > 64:
+            raise ValueError("Map smoothing must be between 0 and 64 TV pixels")
+        if sigma == 0:
+            return self
+        weights = self.valid.astype(np.float32)
+        blurred_weights = cv2.GaussianBlur(weights, (0, 0), sigma)
+        supported = self.valid & (blurred_weights > 0)
+        maps = []
+        for values in (self.map_x, self.map_y):
+            weighted = np.where(self.valid, values, 0).astype(np.float32)
+            blurred = cv2.GaussianBlur(weighted, (0, 0), sigma)
+            result = np.zeros_like(weighted)
+            np.divide(blurred, blurred_weights, out=result, where=supported)
+            maps.append(result)
+        return CalibrationProfile(*maps, self.valid.copy(), self.sample_count, self.view_size)
+
     def _lookup_for(self, width, height):
         """Pixel lookup tables for a source image size, kept for the next frame."""
         key = (width, height)

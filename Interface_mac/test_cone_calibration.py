@@ -184,6 +184,80 @@ class ConeCalibrationTests(unittest.TestCase):
         self.assertFalse(valid[:4, :4].any())
         self.assertTrue(valid[5:, 5:].all())
 
+    def test_smoothing_reduces_quantized_coordinate_steps(self):
+        height, width, cell = 320, 512, 32
+        yy, xx = np.indices((height, width), dtype=np.float32)
+        quantized_x = (xx // cell * cell + (cell - 1) / 2) / (width - 1)
+        quantized_y = (yy // cell * cell + (cell - 1) / 2) / (height - 1)
+        original = CalibrationProfile(quantized_x, quantized_y,
+                                       np.ones((height, width), bool), height * width, (width, height))
+        smooth = original.smoothed(16)
+        interior = np.s_[64:-64, 64:-64]
+        for before, after, truth in ((original.map_x, smooth.map_x, xx / (width - 1)),
+                                      (original.map_y, smooth.map_y, yy / (height - 1))):
+            old_error = np.abs(before - truth)[interior].mean()
+            new_error = np.abs(after - truth)[interior].mean()
+            self.assertLess(float(new_error), float(old_error) * .1)
+        self.assertEqual(smooth.sample_count, original.sample_count)
+        self.assertEqual(smooth.view_size, original.view_size)
+
+    def test_smoothing_does_not_expand_support_or_mix_in_black_coordinates(self):
+        valid = np.zeros((80, 100), bool)
+        valid[10:70, 15:85] = True
+        valid[30:45, 35:55] = False
+        mx = np.where(valid, .72, np.nan).astype(np.float32)
+        my = np.where(valid, .68, np.nan).astype(np.float32)
+        original = CalibrationProfile(mx, my, valid, 100, (100, 80))
+        smooth = original.smoothed(16)
+        np.testing.assert_array_equal(smooth.valid, valid)
+        np.testing.assert_allclose(smooth.map_x[valid], .72, atol=1e-6)
+        np.testing.assert_allclose(smooth.map_y[valid], .68, atol=1e-6)
+        self.assertTrue(np.isfinite(smooth.map_x).all())
+        self.assertFalse(smooth.visualization()[~valid].any())
+        self.assertTrue(np.isnan(original.map_x[~valid]).all())
+        self.assertEqual(smooth.coverage, original.coverage)
+
+    def test_smoothing_reduces_stair_steps_in_a_rendered_slanted_edge(self):
+        height, width, cell = 320, 512, 32
+        yy, xx = np.indices((height, width), dtype=np.float32)
+        quantized_x = xx // cell * cell + (cell - 1) / 2
+        quantized_y = yy // cell * cell + (cell - 1) / 2
+        profile = CalibrationProfile(quantized_x / (width - 1),
+            (quantized_y + .35 * (quantized_x - width / 2)) / (height - 1),
+            np.ones((height, width), bool))
+        source = np.zeros((height, width, 3), np.uint8)
+        source[height // 2:] = 255
+        def edge_deviation(result):
+            columns = np.arange(64, width - 64)
+            edge = np.argmax(result[:, 64:-64, 0] > 127, axis=0)
+            straight_line = np.polyval(np.polyfit(columns, edge, 1), columns)
+            return float(np.sqrt(np.mean((edge - straight_line) ** 2)))
+        before = edge_deviation(profile.apply(source))
+        after = edge_deviation(profile.smoothed(16).apply(source))
+        self.assertGreater(before, 5)
+        self.assertLess(after, before * .1)
+
+    def test_original_lookup_and_map_survive_smoothing_comparison(self):
+        yy, xx = np.indices((60, 80), dtype=np.float32)
+        profile = CalibrationProfile(xx / 79, yy / 59, np.ones((60, 80), bool))
+        image = np.dstack((xx * 3, yy * 4, xx + yy)).astype(np.uint8)
+        before = profile.apply(image)
+        old_lookup = profile._lookup_for(80, 60)
+        smoothed = profile.smoothed(8)
+        self.assertIs(profile.smoothed(0), profile)
+        self.assertFalse(smoothed._lookup)
+        smoothed.apply(image)
+        self.assertIs(profile._lookup_for(80, 60), old_lookup)
+        np.testing.assert_array_equal(profile.apply(image), before)
+
+    def test_smoothing_empty_support_and_invalid_strength(self):
+        empty = CalibrationProfile(np.zeros((8, 10), np.float32),
+                                    np.zeros((8, 10), np.float32), np.zeros((8, 10), bool))
+        self.assertFalse(empty.smoothed(16).visualization().any())
+        for sigma in (-1, float('nan'), 100):
+            with self.assertRaises(ValueError):
+                empty.smoothed(sigma)
+
 
 if __name__ == "__main__":
     unittest.main()
