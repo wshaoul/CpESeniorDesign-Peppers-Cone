@@ -1,3 +1,4 @@
+from studio_theme import Card, ScrollPanel
 # upload_view_circle.py
 #
 # Upload a video and display it through the four-view circle hologram pipeline.
@@ -19,7 +20,7 @@ class UploadView(ttk.Frame):
     """
 
     def __init__(self, parent, controller=None):
-        super().__init__(parent)
+        super().__init__(parent, style="Shell.TFrame")
         self.controller = controller
 
         # ---------- state ----------
@@ -27,14 +28,16 @@ class UploadView(ttk.Frame):
         self.save_while_play_var = tk.BooleanVar(value=False)
 
         # ---------- layout ----------
-        root = ttk.Frame(self)
+        root = ttk.Frame(self, style="Shell.TFrame")
         root.pack(fill="both", expand=True)
 
-        left  = ttk.Frame(root)
-        left.pack(side="left", fill="y", padx=12, pady=12)
+        controls = ScrollPanel(root, width=420)
+        controls.pack(side="left", fill="y", padx=(0, 18))
+        left = controls.content
 
-        right = ttk.Frame(root)
-        right.pack(side="left", fill="both", expand=True, padx=(0, 12), pady=12)
+        preview_card = Card(root)
+        preview_card.pack(side="left", fill="both", expand=True)
+        right = preview_card.content
 
         # Header row
         title_row = ttk.Frame(left)
@@ -42,7 +45,7 @@ class UploadView(ttk.Frame):
         ttk.Button(title_row, text="← Back", command=self._go_back).pack(side="left")
 
         hdr = tk.Label(title_row, text="Upload",
-                       font=("Segoe UI", 12, "bold"), bd=0, highlightthickness=0)
+                       font=("Segoe UI", 22, "bold"), bd=0, highlightthickness=0)
         hdr.pack(side="left", padx=8)
 
         tk.Label(

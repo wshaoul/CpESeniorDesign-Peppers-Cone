@@ -18,9 +18,11 @@ import cv2
 from PIL import Image, ImageTk
 
 from cone_calibration import CalibrationSequence, build_profile, decode_sequence, verification_grid
+from studio_theme import Card, ScrollPanel
 
-PREVIEW_W = 800
-PREVIEW_H = 450
+# Sized to fit the studio's preview card at the default 1280 px window width.
+PREVIEW_W = 720
+PREVIEW_H = 405
 
 # Median of a few frames per pattern hides sensor noise and rolling-shutter tearing.
 SAMPLES_PER_PATTERN = 3
@@ -186,7 +188,7 @@ class CalibrationView(ttk.Frame):
     """Capture a structured-light distortion map of the cone for one audience viewpoint."""
 
     def __init__(self, parent, controller):
-        super().__init__(parent)
+        super().__init__(parent, style="Shell.TFrame")
         self.controller = controller
 
         # Capture state
@@ -214,51 +216,58 @@ class CalibrationView(ttk.Frame):
 
         self._pattern_win = PatternWindow(self, self._cancel_output)
 
-        # --- Title ---
-        ttk.Label(self, text="Cone Calibration", style="Header.TLabel").pack(pady=(10, 4))
-        ttk.Label(self, text="Project green/magenta patterns onto the TV and measure how the cone bends them for the front audience.",
-                  style="Body.TLabel").pack(pady=(0, 10))
+        root = ttk.Frame(self, style="Shell.TFrame")
+        root.pack(fill="both", expand=True)
 
-        top = ttk.Frame(self)
-        top.pack(fill="both", expand=True)
-        left = ttk.Frame(top)
-        left.pack(side="left", fill="both", expand=True, padx=(0, 8))
-        right = ttk.Frame(top)
-        right.pack(side="right", fill="both", expand=True, padx=(8, 0))
+        controls = ScrollPanel(root, width=420)
+        controls.pack(side="left", fill="y", padx=(0, 18))
+        left = controls.content
+
+        preview_card = Card(root)
+        preview_card.pack(side="left", fill="both", expand=True)
+        right = preview_card.content
+
+        # --- Title ---
+        title_row = ttk.Frame(left)
+        title_row.pack(fill="x")
+        ttk.Button(title_row, text="← Back", command=self._go_back).pack(side="left")
+        ttk.Label(title_row, text="Calibrate", style="Header.TLabel").pack(side="left", padx=8)
+        ttk.Label(left, text="Project green/magenta patterns onto the TV and measure how the cone bends them for the front audience.",
+                  style="Body.TLabel", wraplength=360).pack(anchor="w", pady=(8, 12))
 
         # --- Setup steps ---
         steps = ttk.LabelFrame(left, text="Setup")
-        steps.pack(fill="x", padx=4, pady=(0, 10))
-        ttk.Label(steps, wraplength=440, justify="left", text=(
+        steps.pack(fill="x", pady=(0, 8))
+        ttk.Label(steps, wraplength=340, justify="left", text=(
             "1. Connect the TV as an extended display (Win+P > Extend), not duplicated.\n"
             "2. Mount the camera at the audience's eye height and distance, facing the cone. "
             "Turn off auto-framing / background effects.\n"
             "3. Start the camera, then drag a box around the cone reflection only; "
             "exclude the visible TV below it.\n"
             "4. Dim the room lights and keep the camera and cone still during capture."
-        )).pack(anchor="w", padx=8, pady=6)
+        )).pack(anchor="w")
 
         # --- Camera ---
         cam_box = ttk.LabelFrame(left, text="Camera")
-        cam_box.pack(fill="x", padx=4, pady=(0, 10))
+        cam_box.pack(fill="x", pady=(0, 8))
         ttk.Label(cam_box, text="Index:").grid(row=0, column=0, padx=(8, 6), pady=8, sticky="w")
         self.cam_index = ttk.Spinbox(cam_box, from_=0, to=10, width=5, state="readonly")
         self.cam_index.set(0)
         self.cam_index.grid(row=0, column=1, sticky="w")
         ttk.Label(cam_box, text="Backend:").grid(row=0, column=2, padx=(16, 6), sticky="w")
-        self.backend_combo = ttk.Combobox(cam_box, state="readonly", values=[label for (label, _) in BACKENDS], width=22)
+        self.backend_combo = ttk.Combobox(cam_box, state="readonly", values=[label for (label, _) in BACKENDS], width=18)
         self.backend_combo.set(BACKENDS[0][0])
         self.backend_combo.grid(row=0, column=3, sticky="w", padx=(0, 8))
 
         # --- Pattern display ---
         disp_box = ttk.LabelFrame(left, text="Pattern Display")
-        disp_box.pack(fill="x", padx=4, pady=(0, 10))
+        disp_box.pack(fill="x", pady=(0, 8))
         ttk.Label(disp_box, text="Display:").grid(row=0, column=0, padx=(8, 6), pady=8, sticky="w")
-        self.display_combo = ttk.Combobox(disp_box, state="readonly", width=30)
-        self.display_combo.grid(row=0, column=1, sticky="w")
+        self.display_combo = ttk.Combobox(disp_box, state="readonly", width=22)
+        self.display_combo.grid(row=0, column=1, columnspan=2, sticky="w")
         self.display_combo.bind("<<ComboboxSelected>>", lambda e: self._update_sequence_label())
         self.btn_refresh = ttk.Button(disp_box, text="Refresh", command=self._refresh_monitors)
-        self.btn_refresh.grid(row=0, column=2, padx=6)
+        self.btn_refresh.grid(row=1, column=2, padx=6, pady=(0, 8), sticky="e")
         ttk.Label(disp_box, text="Seconds per pattern:").grid(row=1, column=0, padx=(8, 6), pady=(0, 8), sticky="w")
         self.settle_var = tk.DoubleVar(value=1.5)
         self.settle_spin = ttk.Spinbox(disp_box, from_=0.5, to=5.0, increment=0.5, width=5,
@@ -269,37 +278,38 @@ class CalibrationView(ttk.Frame):
 
         # --- Actions ---
         actions = ttk.Frame(left)
-        actions.pack(pady=(6, 2))
+        actions.pack(fill="x", pady=(4, 0))
         self.btn_camera = ttk.Button(actions, text="Start Camera", command=self._toggle_camera)
-        self.btn_capture = ttk.Button(actions, text="Capture Patterns", command=self._start_calibration, state="disabled")
-        self.btn_cancel = ttk.Button(actions, text="Cancel / Hide TV", command=self._cancel_output)
-        back_btn = ttk.Button(actions, text="Back", command=self._go_back)
-        self.btn_camera.grid(row=0, column=0, padx=6)
-        self.btn_capture.grid(row=0, column=1, padx=6)
-        self.btn_cancel.grid(row=0, column=2, padx=6)
-        back_btn.grid(row=0, column=3, padx=6)
+        self.btn_capture = ttk.Button(actions, text="Capture Patterns", style="Primary.TButton",
+                                      command=self._start_calibration, state="disabled")
+        self.btn_camera.pack(side="left")
+        self.btn_capture.pack(side="left", padx=8)
+        self.btn_cancel = ttk.Button(left, text="Cancel / Hide TV", style="TV.TButton", command=self._cancel_output)
+        self.btn_cancel.pack(anchor="w", pady=(8, 0))
 
         # --- Verification ---
         verify = ttk.LabelFrame(left, text="Verify")
-        verify.pack(fill="x", padx=4, pady=(10, 0))
+        verify.pack(fill="x", pady=(12, 0))
         self.btn_plain = ttk.Button(verify, text="Grid without correction", command=lambda: self._show_grid(False))
         self.btn_corrected = ttk.Button(verify, text="Grid with correction", command=lambda: self._show_grid(True))
-        self.btn_save = ttk.Button(verify, text="Save profile", command=self._save_profile)
-        for i, btn in enumerate((self.btn_plain, self.btn_corrected, self.btn_save)):
+        self.btn_save = ttk.Button(verify, text="Save profile", style="Primary.TButton", command=self._save_profile)
+        for btn in (self.btn_plain, self.btn_corrected, self.btn_save):
             btn.config(state="disabled")
-            btn.grid(row=0, column=i, padx=6, pady=8)
+            btn.pack(fill="x", pady=(0, 6))
 
         # --- Progress / Status ---
         self.progress = ttk.Progressbar(left, mode="determinate")
-        self.progress.pack(fill="x", padx=4, pady=(12, 4))
+        self.progress.pack(fill="x", pady=(12, 4))
         self.status = tk.StringVar(value="Status: start the camera to set the cone area.")
-        ttk.Label(left, textvariable=self.status, wraplength=440, justify="left").pack(anchor="w", padx=4)
+        ttk.Label(left, textvariable=self.status, wraplength=360, justify="left",
+                  style="Muted.TLabel").pack(anchor="w")
 
         # --- Right: camera preview with ROI box, and the measured map ---
+        ttk.Label(right, text="Camera Preview", style="Header.TLabel").pack(anchor="w")
         self.tabs = ttk.Notebook(right)
-        self.tabs.pack(padx=4, pady=4)
+        self.tabs.pack(anchor="w", pady=(6, 4))
 
-        self.canvas = tk.Canvas(self.tabs, width=PREVIEW_W, height=PREVIEW_H, bg="black", highlightthickness=0)
+        self.canvas = tk.Canvas(self.tabs, width=PREVIEW_W, height=PREVIEW_H, bg="#0f172a", highlightthickness=0)
         self.canvas.create_text(PREVIEW_W // 2, PREVIEW_H // 2, fill="#9aa7bc",
                                 text="Start the camera, then drag a box around only the cone reflection.")
         self.canvas.bind("<ButtonPress-1>", self._on_roi_press)
@@ -314,10 +324,10 @@ class CalibrationView(ttk.Frame):
         self.map_label.pack(fill="both", expand=True)
         self.tabs.add(map_frame, text="Distortion map")
 
-        ttk.Label(right, wraplength=PREVIEW_W, justify="left", text=(
+        ttk.Label(right, wraplength=PREVIEW_W, justify="left", style="Muted.TLabel", text=(
             "Map: red = horizontal source position, green = vertical; black = unsupported. "
             "Coverage is not an accuracy score."
-        )).pack(anchor="w", padx=4)
+        )).pack(anchor="w")
 
         self._refresh_monitors()
 
@@ -624,6 +634,9 @@ class CalibrationView(ttk.Frame):
         self._pattern_win.hide()
         self.status.set(f"Status: profile saved to {path}. Moving the cone, TV or viewpoint requires recalibration.")
 
-    def _go_back(self):
+    def on_hide(self):
+        """Called by the studio when another tab is selected; frees the camera for Live/Record."""
         self._stop_camera()
+
+    def _go_back(self):
         self.controller.show_page("HomePage")
