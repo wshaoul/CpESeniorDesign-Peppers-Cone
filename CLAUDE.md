@@ -71,6 +71,8 @@ The app enumerates DirectShow devices via `ffmpeg -list_devices` on Windows and 
 | `Interface_updated/live_view_circle.py` | Four-face 360° variant of the warp pipeline |
 | `Interface_updated/record_view.py` | Record raw feed → play back through warp |
 | `Interface_updated/upload_view.py` | Load existing video → play through warp |
+| `Interface_updated/calibration_view.py` | Green/magenta Gray-code cone calibration page (Windows port of Mac calibration studio) |
+| `Interface_updated/cone_calibration.py` | Calibration pattern generation, decoding, and distortion-profile math (shared with `Interface_mac`) |
 | `Interface_updated/studio_circle.py` | Router for circle hologram app |
 | `Interface_updated/realsense_live.py` | Standalone RealSense viewer with warp |
 | `Interface_updated/realsense_test.py` | Hardware diagnostic for RealSense camera |

@@ -1,0 +1,39 @@
+USING AN IPHONE AS THE CAMERA (WINDOWS)
+=======================================
+
+Windows has no Continuity Camera, so we use Camo to make the iPhone show
+up as a normal webcam that Live Studio can open.
+
+1. INSTALL CAMO
+   - iPhone: install "Camo" from the App Store.
+   - PC: install "Camo Studio" from https://reincubate.com/camo/
+   - Connect the iPhone to the PC with a USB cable (more reliable than Wi-Fi).
+   - Open Camo on the iPhone and Camo Studio on the PC. Camo Studio should
+     show the iPhone's live video. Select the iPhone as the source if needed.
+
+2. KEEP CAMO RUNNING
+   - Leave the Camo app open in the foreground on the iPhone, screen unlocked.
+     Camo pauses when the app is backgrounded or the phone locks.
+   - Close other apps that might be using Camo (Zoom, Discord, browser tabs).
+   - A crossed-out-eye image means Camo is paused.
+
+3. SELECT IT IN LIVE STUDIO
+   - Start the app from Interface_updated:
+         winvenv310\Scripts\python.exe studio_main.py
+   - Click "Calibrate Cone" (top-right of the home page).
+   - Set "Index" to the Camo camera and click "Start Camera".
+       * Camo is usually index 1; the laptop webcam is usually index 0.
+         The numbers depend on which cameras are connected, so if you see the
+         wrong camera, click "Stop Camera", change the index, and try again.
+   - If the preview stays black or shows an error, change "Backend" to
+     "DSHOW (DirectShow)" and start the camera again.
+
+4. TIPS FOR CALIBRATION
+   - Hold or mount the iPhone in LANDSCAPE. Portrait wastes most of the image
+     in black side bars.
+   - Mount it at the audience's eye height and distance, facing the cone,
+     and do not move it during or after calibration.
+   - Turn off Camo effects (background blur, auto-framing, filters). Lock
+     exposure, focus and white balance in Camo Studio if available.
+   - Keep the Camo logo (bottom-right corner) outside the yellow box.
+   - Our test feed was 1280x720, which is enough to calibrate.

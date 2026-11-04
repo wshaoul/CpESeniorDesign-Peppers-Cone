@@ -54,6 +54,19 @@ except Exception:
             def _noop(): pass
             return _noop
 
+try:
+    from calibration_view import CalibrationView
+except Exception:
+    class CalibrationView(ttk.Frame):
+        def __init__(self, parent, controller=None):
+            super().__init__(parent)
+            ttk.Label(self, text="Calibration View (placeholder)", font=("Segoe UI", 16, "bold")).pack(pady=40)
+
+        def start_async(self):
+            @run_in_thread
+            def _noop(): pass
+            return _noop
+
 # Modern theming (falls back to ttk if ttkbootstrap isn't installed)
 try:
     import ttkbootstrap as tb
@@ -377,6 +390,13 @@ class HomePage(ttk.Frame if not TTKB else tb.Frame):
 
         rightgrp = (tb.Frame if TTKB else ttk.Frame)(header)
         rightgrp.pack(side="right")
+        self.calibrate_button = (tb.Button if TTKB else ttk.Button)(
+            rightgrp,
+            text="Calibrate Cone",
+            command=lambda: self._nav_and_boot("CalibrationView"),
+            **({"bootstyle": "primary-outline"} if TTKB else {})
+        )
+        self.calibrate_button.pack(side="left", padx=(0, 8))
         self.settings_button = (tb.Button if TTKB else ttk.Button)(
             rightgrp,
             text="Settings",
@@ -687,7 +707,7 @@ if TTKB:
             container.grid_columnconfigure(0, weight=1)
 
             self.pages = {}
-            for Page in (HomePage, LiveView, UploadView, RecordView):
+            for Page in (HomePage, LiveView, UploadView, RecordView, CalibrationView):
                 page = Page(container, self)
                 self.pages[Page.__name__] = page
                 page.grid(row=0, column=0, sticky="nsew")
@@ -728,6 +748,10 @@ if TTKB:
                     else "primary-outline"
                 )
 
+                home.calibrate_button.configure(
+                    bootstyle=button_style
+                )
+
                 home.settings_button.configure(
                     bootstyle=button_style
                 )
@@ -757,7 +781,7 @@ else:
             container.grid_columnconfigure(0, weight=1)
 
             self.pages = {}
-            for Page in (HomePage, LiveView, UploadView, RecordView):
+            for Page in (HomePage, LiveView, UploadView, RecordView, CalibrationView):
                 page = Page(container, self)
                 self.pages[Page.__name__] = page
                 page.grid(row=0, column=0, sticky="nsew")
