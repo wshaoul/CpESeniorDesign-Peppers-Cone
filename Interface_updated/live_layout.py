@@ -90,7 +90,22 @@ def arrange_live(view, top, controls, left, old_card, sections, toggle, tuning, 
     quality.bind("<<ComboboxSelected>>", change_quality)
     view.remove_background = tk.BooleanVar(value=True)
     ttk.Checkbutton(setup, text="Remove camera background", variable=view.remove_background).pack(anchor="w", pady=(0, 12))
-    ttk.Button(setup, text="Find my TV", style="TButton", command=refresh_displays).pack(anchor="w", pady=(0, 10))
+    if not hasattr(view, "_apply_circle_hologram"):
+        # The measured map covers one front viewpoint; the four-face circle view doesn't use it.
+        view.use_calibration = tk.BooleanVar(value=False)
+        view._calibration_error = ""
+        ttk.Checkbutton(setup, text="Use my saved calibration", variable=view.use_calibration,
+                        command=view._toggle_calibration).pack(anchor="w", pady=(0, 2))
+        view._calibration_label = ttk.Label(setup, style="Muted.TLabel", wraplength=255, justify="left")
+        view._calibration_label.pack(anchor="w", pady=(0, 12))
+        view.display_choice.bind("<<ComboboxSelected>>", lambda event: view._refresh_calibration_label())
+        view._refresh_calibration_label()
+    def find_tv():
+        refresh_displays()
+        refresh_label = getattr(view, "_refresh_calibration_label", None)
+        if refresh_label:
+            refresh_label()  # the calibration note compares against the chosen display
+    ttk.Button(setup, text="Find my TV", style="TButton", command=find_tv).pack(anchor="w", pady=(0, 10))
     expanded = tk.BooleanVar(value=False)
     def advanced():
         if expanded.get():

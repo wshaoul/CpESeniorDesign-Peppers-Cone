@@ -1,12 +1,14 @@
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import numpy as np
 import cv2
 
 from cone_calibration import (CalibrationProfile, CalibrationSequence,
-                              build_profile, decode_sequence)
+                              build_profile, decode_sequence,
+                              default_profile_path, place_subject)
 
 
 class ConeCalibrationTests(unittest.TestCase):
@@ -80,6 +82,97 @@ class ConeCalibrationTests(unittest.TestCase):
         safe = valid & (xx<width-6) & (yy<height-6)
         error = np.abs(reflected.astype(np.int16)-target.astype(np.int16))[safe]
         self.assertLess(float(error.mean()),5)
+
+    def test_blurred_fine_stripes_still_decode_to_a_coarse_cell(self):
+        """A camera that can't resolve the last bits must still yield positions."""
+        width, height = 128, 96
+        sequence = CalibrationSequence(width, height)
+        frames = []
+        for index in range(len(sequence)):
+            frame = sequence.frame(index).astype(np.float32)
+            if index >= len(sequence) - 3 or 2 + sequence.x_bits - 3 <= index < 2 + sequence.x_bits:
+                # The last three bits of each axis average to grey, like an
+                # unresolved stripe pattern.
+                frame[:] = np.array((127, 127, 127), np.float32)
+            frames.append(frame.astype(np.uint8))
+        screen_x, screen_y, valid = decode_sequence(frames, (width, height), max_cell=8)
+        yy, xx = np.indices((height, width))
+        self.assertGreater(valid.mean(), .95)
+        # Position is the centre of an 8-pixel cell: off by at most 4 pixels.
+        self.assertLessEqual(int(np.abs(screen_x - xx)[valid].max()), 4)
+        self.assertLessEqual(int(np.abs(screen_y - yy)[valid].max()), 4)
+
+        # The old all-bits rule would have rejected every pixel; a tighter
+        # max_cell must reject them too rather than guess.
+        _, _, strict = decode_sequence(frames, (width, height), max_cell=4)
+        self.assertFalse(strict.any())
+
+    def test_dim_reflection_with_colour_cast_decodes_correctly(self):
+        """Per-pixel midpoint: a +30 green cast must not flip any bits."""
+        width, height = 64, 48
+        sequence = CalibrationSequence(width, height)
+        frames = []
+        for index in range(len(sequence)):
+            frame = sequence.frame(index).astype(np.float32) * .15   # dim reflection
+            frame[:, :, 1] += 30                                     # green ambient cast
+            frames.append(np.clip(frame, 0, 255).astype(np.uint8))
+        screen_x, screen_y, valid = decode_sequence(frames, (width, height))
+        yy, xx = np.indices((height, width))
+        self.assertTrue(valid.all())
+        np.testing.assert_array_equal(screen_x, xx)
+        np.testing.assert_array_equal(screen_y, yy)
+
+    def test_noise_level_contrast_is_not_trusted(self):
+        """Bits that sit near the midpoint must be dropped, not guessed."""
+        width, height = 64, 48
+        sequence = CalibrationSequence(width, height)
+        rng = np.random.default_rng(1)
+        frames = []
+        for index in range(len(sequence)):
+            frame = sequence.frame(index).astype(np.float32)
+            if index >= 2:
+                frame = 127 + (frame - 127) * .02 + rng.normal(0, 3, frame.shape)
+            frames.append(np.clip(frame, 0, 255).astype(np.uint8))
+        _, _, valid = decode_sequence(frames, (width, height), max_cell=2)
+        self.assertLess(valid.mean(), .05)
+
+    def test_place_subject_keeps_the_frame_size_and_scales_about_the_centre(self):
+        image = np.zeros((60, 100, 3), np.uint8)
+        image[20:40, 40:60] = 255                       # 20x20 block in the middle
+        self.assertIs(place_subject(image), image)
+        for zoom in (.5, 2.0):
+            result = place_subject(image, zoom)
+            self.assertEqual(result.shape, image.shape)
+            ys, xs = np.nonzero(result[:, :, 0] > 200)
+            self.assertAlmostEqual(xs.max() - xs.min() + 1, 20 * zoom, delta=2)
+            self.assertAlmostEqual((xs.max() + xs.min()) / 2, 49.5, delta=1.5)
+            self.assertAlmostEqual((ys.max() + ys.min()) / 2, 29.5, delta=1.5)
+
+    def test_place_subject_zooming_in_crops_and_mirror_flips(self):
+        image = np.zeros((40, 40, 3), np.uint8)
+        image[:, :4] = 255                              # bright strip on the left edge
+        self.assertFalse(place_subject(image, 3.0)[:, :, 0].any())   # pushed out of frame
+        flipped = place_subject(image, mirror=True)
+        self.assertTrue(flipped[:, -4:].all())
+        self.assertFalse(flipped[:, :4].any())
+
+    def test_profile_reuses_its_lookup_for_the_same_frame_size(self):
+        yy, xx = np.indices((30, 50), dtype=np.float32)
+        profile = CalibrationProfile(xx / 49, yy / 29, np.ones((30, 50), bool), 1500, (50, 30))
+        image = np.dstack((xx * 5, yy * 8, xx + yy)).astype(np.uint8)
+        first = profile.apply(image)
+        lookup = dict(profile._lookup)
+        np.testing.assert_array_equal(profile.apply(image), first)
+        self.assertEqual(list(profile._lookup), list(lookup))
+        self.assertIs(next(iter(profile._lookup.values()))[0], next(iter(lookup.values()))[0])
+        profile.apply(cv2.resize(image, (25, 15)))      # a different size replaces it
+        self.assertEqual(len(profile._lookup), 1)
+
+    def test_saved_map_lives_in_one_place_for_both_tabs(self):
+        with unittest.mock.patch.dict("os.environ", {"APPDATA": r"C:\Users\someone\AppData\Roaming"}):
+            path = default_profile_path()
+        self.assertEqual(path.name, "front_audience_calibration.npz")
+        self.assertEqual(path.parent.name, "PeppersCone")
 
     def test_sequence_rejects_weak_or_outside_pixels(self):
         sequence = CalibrationSequence(32, 24)

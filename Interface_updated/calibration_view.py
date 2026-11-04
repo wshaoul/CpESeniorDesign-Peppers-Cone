@@ -19,7 +19,8 @@ import numpy as np
 import cv2
 from PIL import Image, ImageTk
 
-from cone_calibration import CalibrationSequence, build_profile, decode_sequence, verification_grid
+from cone_calibration import (CalibrationSequence, build_profile, decode_sequence,
+                              default_profile_path, verification_grid)
 from studio_theme import Card, ScrollPanel
 
 # Sized to fit the studio's preview card at the default 1280 px window width.
@@ -36,11 +37,6 @@ BACKENDS = [
 ]
 
 
-def default_profile_path():
-    root = Path(os.environ.get("APPDATA", Path.home())) / "PeppersCone"
-    return root / "front_audience_calibration.npz"
-
-
 # ---------- Recorded calibration ----------
 TAIL_SECONDS = 3           # black after the last pattern; marks the end of the sequence
 RECORDING_MAX_WIDTH = 1920  # 4K phone video is downscaled to keep 24 stored frames small
@@ -54,11 +50,70 @@ def frame_signals(frame):
     return (b + g + r) / 3, g - (b + r) / 2
 
 
-def find_pattern_run(times, levels, greens, count):
+def change_peaks(times, changes, min_gap=0.3):
+    """Moments where the picture changes sharply, as [(time, strength)].
+
+    Each pattern switch is a large frame-to-frame change; stripes, solid colours
+    and the final black all produce one, whatever the room lighting.
+    """
+    times = np.asarray(times, float)
+    changes = np.asarray(changes, float)
+    if changes.size < 5:
+        return []
+    threshold = max(0.35 * np.percentile(changes, 97), 4 * np.median(changes), 0.5)
+    peaks = []
+    for i in range(1, len(changes) - 1):
+        if changes[i] > threshold and changes[i] >= changes[i - 1] and changes[i] >= changes[i + 1]:
+            if peaks and times[i] - peaks[-1][0] < min_gap:
+                if changes[i] > peaks[-1][1]:
+                    peaks[-1] = (times[i], changes[i])
+            else:
+                peaks.append((times[i], changes[i]))
+    return peaks
+
+
+def follow_cadence(times, changes, start_hint):
+    """Follow the evenly spaced pattern switches that begin at the green onset.
+
+    Returns (start, end, switches, period): the black-to-green switch, the last
+    switch in the chain, how many switches came after the first, and the median
+    gap between them. None when no regular cadence can be found.
+    """
+    peaks = change_peaks(times, changes)
+    if len(peaks) < 4:
+        return None
+    pt = np.array([p[0] for p in peaks])
+    first = int(np.argmin(np.abs(pt - start_hint)))
+    if abs(pt[first] - start_hint) > 0.4:
+        return None
+    gaps = np.diff(pt[first:first + 6])
+    gaps = gaps[(gaps >= 0.3) & (gaps <= 6)]
+    if len(gaps) < 3:
+        return None
+    period = float(np.median(gaps))
+
+    chain, switches = [pt[first]], 0
+    while True:
+        for skipped in (1, 2):  # tolerate one weak switch the detector missed
+            expected = chain[-1] + skipped * period
+            near = np.nonzero(np.abs(pt - expected) <= 0.35 * period)[0]
+            if near.size:
+                chain.append(pt[max(near, key=lambda j: peaks[j][1])])
+                switches += skipped
+                break
+        else:
+            break
+    return chain[0], chain[-1], switches, period
+
+
+def find_pattern_run(times, levels, greens, count, changes=None):
     """Locate the played sequence in a recording.
 
-    The green reference is the greenest moment in the video; the sequence ends
-    when the frame drops back to black. Returns (start, period) in seconds.
+    The green reference is the greenest moment in the video. When per-frame
+    ``changes`` are supplied the pattern switches are followed from there, which
+    works in a lit room and also counts the patterns actually played. Otherwise
+    the sequence is taken to end when the frame drops back to black.
+    Returns (start, period) in seconds.
     """
     times = np.asarray(times, float)
     levels = np.asarray(levels, float)
@@ -74,6 +129,27 @@ def find_pattern_run(times, levels, greens, count):
     before = levels[(times >= start - 1.0) & (times < start - 0.15)]
     if before.size == 0:
         raise ValueError("Start recording a few seconds before the TV turns green.")
+
+    cadence = follow_cadence(times, changes, start) if changes is not None else None
+    if cadence is not None:
+        start, end, switches, period = cadence
+        if switches == count - 1 and times[-1] - end < 1.5 * period:
+            raise ValueError("The recording stops before the patterns finished. "
+                             "Keep recording until the TV goes black again.")
+        if switches != count:
+            raise ValueError(
+                f"The recording shows {switches} patterns but the selected display needs {count}. "
+                "Select the display the patterns were played on. Windows display scaling "
+                "changes the size the app sees, and with it the number of patterns.")
+        period = (end - start) / count
+        if not 0.3 <= period <= 6:
+            raise ValueError(f"Found {period:.2f} s per pattern, which doesn't look like the played sequence. "
+                             "Check that the selected display matches the TV the patterns were played on.")
+        magenta = (times >= start + 1.25 * period) & (times <= start + 1.75 * period)
+        if not magenta.any() or np.median(greens[magenta]) >= 0:
+            raise ValueError("The pattern timing didn't line up (no magenta after green). Record again.")
+        return start, period
+
     during = levels[(times >= start + 0.1) & (times < start + 0.3)]
     if during.size == 0:
         during = levels[onset:onset + 1]
@@ -117,7 +193,8 @@ def read_recording(path, count, report=lambda message, fraction: None):
     cap = open_video()
     total = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    times, levels, greens = [], [], []
+    times, levels, greens, changes = [], [], [], []
+    previous = None
     try:
         while True:
             ok, frame = cap.read()
@@ -127,6 +204,9 @@ def read_recording(path, count, report=lambda message, fraction: None):
             level, green = frame_signals(frame)
             levels.append(level)
             greens.append(green)
+            small = cv2.resize(frame, (96, 54), interpolation=cv2.INTER_AREA).astype(np.float32)
+            changes.append(0.0 if previous is None else float(np.abs(small - previous).mean()))
+            previous = small
             if len(times) % 30 == 0:
                 report(f"Scanning video… {len(times)}/{total} frames", 0.7 * min(1, len(times) / total))
     finally:
@@ -137,7 +217,7 @@ def read_recording(path, count, report=lambda message, fraction: None):
     if np.any(np.diff(times) <= 0):
         times = np.arange(len(times)) / fps  # container without usable timestamps
 
-    start, period = find_pattern_run(times, levels, greens, count)
+    start, period = find_pattern_run(times, levels, greens, count, changes)
 
     # Sample the middle half of each pattern, away from the switch-over.
     wanted = {}
@@ -906,9 +986,19 @@ class CalibrationView(ttk.Frame):
         self._latest_frame = frames[0]  # green reference: the reflection shows up clearly
         self._draw_preview(self._latest_frame)
         self.tabs.select(0)
+        # The recording's length divided by the expected pattern count gives the period. If the
+        # wrong display is selected the count is off, the period comes out wrong, and every
+        # later pattern is sampled from the neighbouring one without any other error.
+        settle = self._settle_seconds()
+        mismatch = ""
+        if abs(period - settle) > 0.025 * settle:
+            mismatch = (f" WARNING: that is {period:.2f} s per pattern but 'Seconds per pattern' is "
+                        f"{settle:.1f} s. Either that setting changed since you played the patterns, "
+                        "or the selected display isn't the one they were played on (it sets how many "
+                        "patterns to expect). Fix it and load the recording again.")
         self.status.set(f"Status: found all {len(frames)} patterns ({period:.2f} s each, decoding for "
                         f"{w} x {h}). The green frame shows the reflection; drag the box around the "
-                        "cone reflection only, then click Build Map.")
+                        f"cone reflection only, then click Build Map.{mismatch}")
 
     def _build_from_recording(self):
         if self._recording is None:
