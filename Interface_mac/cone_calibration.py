@@ -1,7 +1,9 @@
 """Structured-light calibration for a front-facing Pepper's Cone viewer."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
@@ -10,6 +12,36 @@ import numpy as np
 
 GREEN = np.array((0, 255, 0), np.uint8)
 MAGENTA = np.array((255, 0, 255), np.uint8)
+
+
+def default_profile_path():
+    """Where the Calibrate tab saves the map and the Live tab looks for it."""
+    fallback = Path.home() / "Library" / "Application Support" if sys.platform == "darwin" else Path.home()
+    root = Path(os.environ.get("APPDATA", fallback)) / "PeppersCone"
+    return root / "front_audience_calibration.npz"
+
+
+def place_subject(image, zoom=1.0, mirror=False):
+    """Scale a frame about its centre without changing its size.
+
+    zoom < 1 shrinks the picture onto black; zoom > 1 enlarges it and crops the
+    edges. mirror flips it left to right.
+    """
+    zoom = float(np.clip(zoom, 0.05, 4.0))
+    if mirror:
+        image = cv2.flip(image, 1)
+    if abs(zoom - 1) < 1e-3:
+        return image
+    height, width = image.shape[:2]
+    new_width, new_height = max(1, round(width * zoom)), max(1, round(height * zoom))
+    scaled = cv2.resize(image, (new_width, new_height),
+                        interpolation=cv2.INTER_AREA if zoom < 1 else cv2.INTER_LINEAR)
+    placed = np.zeros_like(image)
+    src_x, src_y = max(0, (new_width - width) // 2), max(0, (new_height - height) // 2)
+    dst_x, dst_y = max(0, (width - new_width) // 2), max(0, (height - new_height) // 2)
+    w, h = min(width, new_width), min(height, new_height)
+    placed[dst_y:dst_y + h, dst_x:dst_x + w] = scaled[src_y:src_y + h, src_x:src_x + w]
+    return placed
 
 
 def verification_grid(width, height):
@@ -97,11 +129,24 @@ def _gray_to_binary(gray):
     return value
 
 
-def decode_sequence(frames, screen_size, roi_mask=None, min_contrast=12):
+def decode_sequence(frames, screen_size, roi_mask=None, min_contrast=12,
+                    confidence=0.25, max_cell=32):
     """Decode camera observations into camera-to-screen correspondences.
 
     Frames must already be cropped to the reflected cone region. Returned x/y
     arrays contain TV pixel coordinates for every valid camera pixel.
+
+    Every pixel is judged against its own green and magenta reference levels,
+    so a dim reflection or an ambient colour cast shifts the decision point
+    instead of flipping bits. A bit only counts when it lands at least
+    ``confidence`` of the way from that midpoint toward green or magenta.
+
+    The finest stripes are often blurred past what the camera can resolve
+    (small reflection, compressed video, a screen scaled by Windows). Rather
+    than discard a pixel whose last few bits are unreadable, the leading
+    readable bits are decoded and the pixel is placed at the centre of the TV
+    cell they identify. Cells wider than ``max_cell`` TV pixels are dropped,
+    so the position error of every kept pixel is at most ``max_cell / 2``.
     """
     width, height = screen_size
     sequence = CalibrationSequence(width, height)
@@ -111,34 +156,40 @@ def decode_sequence(frames, screen_size, roi_mask=None, min_contrast=12):
     if any(frame.shape[:2] != shape for frame in frames):
         raise ValueError("Calibration frames must have matching dimensions")
 
-    green_reference = _color_difference(frames[0])
-    magenta_reference = -_color_difference(frames[1])
-    valid = (green_reference >= min_contrast) & (magenta_reference >= min_contrast)
+    green_reference = _color_difference(frames[0]).astype(np.float32)
+    magenta_reference = _color_difference(frames[1]).astype(np.float32)
+    swing = green_reference - magenta_reference
+    midpoint = (green_reference + magenta_reference) / 2
+    valid = ((green_reference > midpoint) & (magenta_reference < midpoint)
+             & (swing >= 2 * min_contrast))
     if roi_mask is not None:
         if roi_mask.shape != shape:
             raise ValueError("ROI mask must match the camera frame")
         valid &= roi_mask.astype(bool)
+    half_swing = np.maximum(swing / 2, 1e-3)
 
-    gray_x = np.zeros(shape, np.uint32)
-    gray_y = np.zeros(shape, np.uint32)
-    confidence = np.full(shape, 32767, np.int16)
-    offset = 2
-    for index in range(sequence.x_bits):
-        difference = _color_difference(frames[offset + index])
-        gray_x = (gray_x << 1) | (difference > 0)
-        confidence = np.minimum(confidence, np.abs(difference))
-    offset += sequence.x_bits
-    for index in range(sequence.y_bits):
-        difference = _color_difference(frames[offset + index])
-        gray_y = (gray_y << 1) | (difference > 0)
-        confidence = np.minimum(confidence, np.abs(difference))
+    def decode_axis(first, bits, size):
+        gray = np.zeros(shape, np.uint32)
+        depth = np.zeros(shape, np.int32)
+        readable = valid.copy()
+        for index in range(bits):
+            level = (_color_difference(frames[first + index]).astype(np.float32)
+                     - midpoint) / half_swing
+            readable &= np.abs(level) >= confidence
+            gray = np.where(readable, (gray << 1) | (level > 0), gray)
+            depth += readable
+        # Gray-to-binary only looks at more significant bits, so the leading
+        # bits alone give the exact top bits of the position.
+        binary = _gray_to_binary(gray).astype(np.int64)
+        unknown = (bits - depth).astype(np.int64)
+        cell = np.left_shift(1, unknown)
+        centre = np.left_shift(binary, unknown) + (cell >> 1)
+        usable = (depth > 0) & (cell <= max_cell) & (centre >= 0) & (centre < size)
+        return np.clip(centre, 0, size - 1).astype(np.int32), usable
 
-    screen_x = _gray_to_binary(gray_x).astype(np.int32)
-    screen_y = _gray_to_binary(gray_y).astype(np.int32)
-    valid &= confidence >= max(3, min_contrast // 2)
-    valid &= (screen_x >= 0) & (screen_x < width)
-    valid &= (screen_y >= 0) & (screen_y < height)
-    return screen_x, screen_y, valid
+    screen_x, usable_x = decode_axis(2, sequence.x_bits, width)
+    screen_y, usable_y = decode_axis(2 + sequence.x_bits, sequence.y_bits, height)
+    return screen_x, screen_y, valid & usable_x & usable_y
 
 
 @dataclass
@@ -150,6 +201,7 @@ class CalibrationProfile:
     valid: np.ndarray
     sample_count: int = 0
     view_size: tuple | None = None
+    _lookup: dict = field(default_factory=dict, init=False, repr=False, compare=False)
 
     @property
     def screen_size(self):
@@ -158,6 +210,16 @@ class CalibrationProfile:
     @property
     def coverage(self):
         return float(np.count_nonzero(self.valid) / self.valid.size)
+
+    def _lookup_for(self, width, height):
+        """Pixel lookup tables for a source image size, kept for the next frame."""
+        key = (width, height)
+        if key not in self._lookup:
+            self._lookup.clear()  # live video keeps one size; don't accumulate old ones
+            self._lookup[key] = (
+                np.where(self.valid, self.map_x * max(1, width - 1), -1).astype(np.float32),
+                np.where(self.valid, self.map_y * max(1, height - 1), -1).astype(np.float32))
+        return self._lookup[key]
 
     def apply(self, image):
         if self.view_size is not None:
@@ -172,8 +234,7 @@ class CalibrationProfile:
                 image,(fitted_width,fitted_height),interpolation=cv2.INTER_LINEAR)
             image = fitted
         height, width = image.shape[:2]
-        map_x = np.where(self.valid, self.map_x * max(1, width - 1), -1).astype(np.float32)
-        map_y = np.where(self.valid, self.map_y * max(1, height - 1), -1).astype(np.float32)
+        map_x, map_y = self._lookup_for(width, height)
         return cv2.remap(image, map_x, map_y, cv2.INTER_LINEAR,
                          borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
 

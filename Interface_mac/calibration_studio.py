@@ -1,25 +1,20 @@
 """Guided optical calibration for the Mac 3D model output."""
 from __future__ import annotations
 
-from pathlib import Path
 import time
 
 import cv2
 import numpy as np
-from PySide6.QtCore import Qt, QStandardPaths, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QKeyEvent, QPixmap
-from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFormLayout,
+from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFormLayout, QFileDialog,
     QHBoxLayout, QLabel, QPushButton, QProgressBar, QSpinBox, QVBoxLayout,
-    QWidget, QDoubleSpinBox, QTabWidget)
+    QWidget, QDoubleSpinBox, QTabWidget, QScrollArea)
 
-from cone_calibration import CalibrationSequence, build_profile, decode_sequence, verification_grid
+from cone_calibration import (CalibrationSequence, build_profile, decode_sequence,
+                              default_profile_path, verification_grid)
 from calibration_camera import CalibrationCamera
-
-
-def default_profile_path():
-    root = Path(QStandardPaths.writableLocation(
-        QStandardPaths.StandardLocation.GenericDataLocation)) / "PeppersCone"
-    return root / "front_audience_calibration.npz"
+from calibration_recording import RecordingAnalysis, TAIL_SECONDS
 
 
 class CameraRoiPreview(QLabel):
@@ -154,9 +149,19 @@ class CalibrationDialog(QDialog):
         self.capture_shape = None
         self.capture_screen = None
         self.pending_cameras = []
+        self.recording = None
+        self.analysis = None
+        self.playback = None
         self.pattern_window.dismissed.connect(self.cancel_output)
 
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+        layout = QVBoxLayout(content)
         title = QLabel("Front audience calibration")
         title.setObjectName("title")
         layout.addWidget(title)
@@ -189,9 +194,40 @@ class CalibrationDialog(QDialog):
         self.settle_seconds.setSingleStep(.5)
         self.settle_seconds.setValue(1.5)
         controls.addRow("Seconds per pattern",self.settle_seconds)
+        self.output_width = QSpinBox()
+        self.output_height = QSpinBox()
+        for spin, value in ((self.output_width, output_size[0]), (self.output_height, output_size[1])):
+            spin.setRange(1, 7680)
+            spin.setValue(value)
+            spin.valueChanged.connect(self.update_sequence)
+        size_row = QHBoxLayout()
+        size_row.addWidget(self.output_width)
+        size_row.addWidget(QLabel("×"))
+        size_row.addWidget(self.output_height)
+        size_row.setStretch(0, 1)
+        size_row.setStretch(2, 1)
+        controls.addRow("Pattern / recording size", size_row)
         self.pattern_size = QLabel(f"{output_size[0]} × {output_size[1]} • {len(self.sequence)} patterns")
         controls.addRow("Calibration sequence",self.pattern_size)
         layout.addLayout(controls)
+
+        recording_actions = QHBoxLayout()
+        self.lead_seconds = QSpinBox()
+        self.lead_seconds.setRange(3, 30)
+        self.lead_seconds.setValue(10)
+        self.lead_seconds.setMaximumWidth(80)
+        recording_actions.addWidget(QLabel("Black lead-in (s)"))
+        recording_actions.addWidget(self.lead_seconds)
+        self.play_button = QPushButton("Play for recording")
+        self.load_button = QPushButton("Load recording…")
+        self.build_button = QPushButton("Build map")
+        self.build_button.setEnabled(False)
+        self.play_button.clicked.connect(self.play_for_recording)
+        self.load_button.clicked.connect(self.load_recording)
+        self.build_button.clicked.connect(self.build_from_recording)
+        for button in (self.play_button, self.load_button, self.build_button):
+            recording_actions.addWidget(button)
+        layout.addLayout(recording_actions)
 
         self.preview = CameraRoiPreview()
         self.preview.setMinimumSize(580,240)
@@ -244,6 +280,126 @@ class CalibrationDialog(QDialog):
 
         self.camera_timer = QTimer(self)
         self.camera_timer.timeout.connect(self.update_camera)
+        self.recording_timer = QTimer(self)
+        self.recording_timer.timeout.connect(self.poll_recording)
+        self.playback_timer = QTimer(self)
+        self.playback_timer.timeout.connect(self.playback_tick)
+
+    def update_sequence(self):
+        self.sequence = CalibrationSequence(self.output_width.value(), self.output_height.value())
+        self.pattern_size.setText(f"{self.sequence.width} × {self.sequence.height} • {len(self.sequence)} patterns")
+        self.capture_button.setText(f"Capture {len(self.sequence)} patterns")
+        self.progress.setRange(0, len(self.sequence))
+
+    def set_setup_enabled(self, enabled):
+        for widget in (self.camera_button, self.screen, self.refresh_button, self.settle_seconds,
+                       self.output_width, self.output_height, self.lead_seconds, self.play_button, self.load_button):
+            widget.setEnabled(enabled)
+        self.build_button.setEnabled(enabled and self.recording is not None)
+        self.capture_button.setEnabled(enabled and self.capture is not None and self.latest_frame is not None)
+        self.preview.setEnabled(enabled)
+
+    def play_for_recording(self):
+        if len(QApplication.screens()) < 2:
+            self.status.setText("Connect the TV as an extended display before playing recording patterns.")
+            return
+        self.stop_camera()
+        self.capture_screen = self.screen.currentData()
+        self.playback = {"start": time.monotonic(), "screen": self.capture_screen,
+                         "lead": self.lead_seconds.value(), "hold": self.settle_seconds.value(), "index": None}
+        self.set_setup_enabled(False)
+        self.pattern_window.open_on(self.capture_screen)
+        self.playback_timer.start(20)
+        self.playback_tick()
+
+    def playback_tick(self):
+        playback = self.playback
+        if playback is None:
+            return
+        if playback["screen"] not in QApplication.screens():
+            self.abort_calibration("The pattern display disconnected. Reconnect the TV and record again.")
+            return
+        elapsed = time.monotonic() - playback["start"]
+        duration = len(self.sequence) * playback["hold"]
+        if elapsed >= playback["lead"] + duration + TAIL_SECONDS:
+            self.abort_calibration("Finished. Stop the phone recording, then load it with the same pattern size selected.")
+            return
+        index = int((elapsed - playback["lead"]) // playback["hold"]) if elapsed >= playback["lead"] else -1
+        if index >= len(self.sequence):
+            index = -1
+        if index == playback["index"]:
+            return
+        playback["index"] = index
+        if index < 0:
+            self.pattern_window.set_frame(np.zeros((self.sequence.height, self.sequence.width, 3), np.uint8))
+            self.status.setText("TV is black. Keep the phone recording through the patterns and final black tail.")
+        else:
+            self.pattern_window.set_frame(self.sequence.frame(index))
+            self.progress.setValue(index + 1)
+            self.status.setText(f"Playing {index + 1}/{len(self.sequence)}: {self.sequence.label(index)}. Keep the phone fixed.")
+
+    def load_recording(self, path=None):
+        if not path:
+            path, _ = QFileDialog.getOpenFileName(self, "Load calibration recording", "", "Videos (*.mp4 *.mov *.m4v *.avi)")
+        if not path:
+            return
+        self.stop_camera()
+        size = (self.sequence.width, self.sequence.height)
+        self.analysis = RecordingAnalysis(path, len(self.sequence), size)
+        self.analysis.thread.start()
+        self.profile = None
+        self.map_preview.setText("Build a new map after selecting the reflection.")
+        for button in (self.plain_button, self.corrected_button, self.save_button):
+            button.setEnabled(False)
+        self.set_setup_enabled(False)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.status.setText("Reading recording…")
+        self.recording_timer.start(100)
+
+    def poll_recording(self):
+        analysis = self.analysis
+        if analysis is None:
+            return
+        if analysis.thread.is_alive():
+            self.status.setText(analysis.message)
+            self.progress.setValue(round(analysis.fraction * 100))
+            return
+        self.recording_timer.stop()
+        self.analysis = None
+        self.progress.setRange(0, len(self.sequence))
+        self.progress.setValue(0)
+        if analysis.error:
+            self.set_setup_enabled(True)
+            self.status.setText(analysis.error)
+            return
+        frames, period = analysis.result
+        self.recording = {"frames": frames, "size": analysis.screen_size}
+        self.profile = None
+        for button in (self.plain_button, self.corrected_button, self.save_button):
+            button.setEnabled(False)
+        self.latest_frame = frames[0]
+        self.preview.set_frame(frames[0])
+        self.tabs.setCurrentIndex(0)
+        self.set_setup_enabled(True)
+        mismatch = " Check the source display size: the period differs from Seconds per pattern." if abs(period - self.settle_seconds.value()) > .025 * self.settle_seconds.value() else ""
+        self.status.setText(f"Found {len(frames)} patterns at {period:.3f} s each. Drag a box around only the cone reflection, then Build map.{mismatch}")
+
+    def build_from_recording(self):
+        if self.recording is None:
+            return
+        if self.recording["size"] != (self.sequence.width, self.sequence.height):
+            self.status.setText("Restore the recording's source pattern size before building the map.")
+            return
+        frames = self.recording["frames"]
+        x1, y1, x2, y2 = self.preview.roi_pixels(frames[0].shape)
+        if x2 - x1 < 40 or y2 - y1 < 40:
+            self.status.setText("Draw a larger box around the cone reflection.")
+            return
+        self.capture_roi = (x1, y1, x2, y2)
+        self.capture_screen = self.screen.currentData()
+        self.captured_frames = [frame[y1:y2, x1:x2] for frame in frames]
+        self.finish_calibration()
 
     def toggle_camera(self):
         if self.capture is not None:
@@ -321,6 +477,7 @@ class CalibrationDialog(QDialog):
         self.refresh_button.setEnabled(False)
         self.settle_seconds.setEnabled(False)
         self.preview.setEnabled(False)
+        self.set_setup_enabled(False)
         self.capture_roi = (x1,y1,x2,y2)
         self.capture_shape = self.latest_frame.shape
         self.capture_screen = self.screen.currentData()
@@ -358,6 +515,9 @@ class CalibrationDialog(QDialog):
 
     def finish_calibration(self):
         self.pattern_window.hide()
+        self.profile = None
+        for button in (self.plain_button,self.corrected_button,self.save_button):
+            button.setEnabled(False)
         self.status.setText("Building and smoothing the deformation map…")
         try:
             screen_x,screen_y,valid = decode_sequence(
@@ -379,6 +539,8 @@ class CalibrationDialog(QDialog):
             button.setEnabled(True)
 
     def abort_calibration(self,message):
+        self.playback_timer.stop()
+        self.playback = None
         self.pattern_window.hide()
         self.pattern_index = -1
         self.captured_frames = []
@@ -389,6 +551,7 @@ class CalibrationDialog(QDialog):
         self.settle_seconds.setEnabled(True)
         self.preview.setEnabled(True)
         self.capture_button.setEnabled(self.capture is not None)
+        self.set_setup_enabled(True)
         self.status.setText(message)
 
     def cancel_output(self):
@@ -427,9 +590,13 @@ class CalibrationDialog(QDialog):
             return
         self.profile_ready.emit(self.profile)
         self.pattern_window.hide()
-        self.status.setText("Map saved and selected in 3D Model. Close this window, test the cube, then choose Tiger demo. Moving the cone, TV or viewpoint requires recalibration.")
+        self.status.setText("Map saved and selected in the page that opened calibration. Close this window and test the live view or 3D model. Moving the cone, TV or viewpoint requires recalibration.")
 
     def stop_camera(self):
+        self.recording_timer.stop()
+        if self.analysis is not None:
+            self.analysis.cancel()
+            self.analysis = None
         self.cancel_output()
         self.camera_timer.stop()
         if self.capture is not None:

@@ -1,10 +1,11 @@
 """Experimental repeated-view cone mapping, not a calibrated 360 light field."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
 
 from processing import make_segmenter
+from cone_calibration import place_subject
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,7 @@ class ProjectionSettings:
     remove_background: bool = True
     portrait_crop: bool = True
     antialias: bool = True
+    calibration: object = field(default=None, compare=False, repr=False)
 
 
 def build_maps(source_shape, settings):
@@ -113,6 +115,15 @@ class LiveProjector:
             small = cv2.resize(frame, (round(w*min(1,384/w)), round(h*min(1,384/w))))
             result = self.segmenter.process(cv2.cvtColor(small, cv2.COLOR_BGR2RGB))
             alpha = np.clip((result.segmentation_mask-.25)/.35, 0, 1)
+        if settings.calibration is not None:
+            image = frame
+            if alpha is not None:
+                alpha = cv2.resize(alpha, (frame.shape[1], frame.shape[0]))
+                image = cv2.multiply(frame, cv2.merge((alpha, alpha, alpha)), dtype=cv2.CV_8U)
+            image = place_subject(image, zoom=settings.zoom / .85, mirror=settings.mirror)
+            output = settings.calibration.apply(image)
+            lut = np.clip(np.arange(256) * settings.gain, 0, 255).astype(np.uint8)
+            return cv2.LUT(output, lut)
         key = (frame.shape[:2], settings)
         if key != self.key:
             self.maps = build_maps(frame.shape, settings)

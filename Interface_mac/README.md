@@ -28,6 +28,44 @@ background removal and output-resolution options. **720p output** is the
 default; the higher-resolution options may run more slowly. These options change
 the cone output resolution, not the camera's captured detail.
 
+## Test Will's calibrated live workflow on Mac
+
+The Mac app now includes the recorded-calibration decoder and saved-map live
+output from `Will-S-improve-cone-view` through commit `a7069ac`. The Windows
+implementation remains in `Interface_updated`.
+
+1. Open **Live → Calibrate / load recording**. Live capture stops so calibration
+   can use the camera.
+2. Set **Pattern / recording size** to the dimensions used when the patterns
+   were played. For the supplied November 4 WhatsApp clip, use **1536 × 960**
+   from the screenshot, with **1.5 seconds per pattern**. The clip itself does
+   not store the source display dimensions; a different clip may need others.
+3. Click **Load recording…**, choose the `.mp4` or `.mov`, and wait for the green
+   reference frame. Draw the box around the cone reflection, excluding the TV
+   strip beneath it, then click **Build map**.
+4. At the physical setup, compare **Grid without correction** and **Grid with
+   correction** from the original phone position. Click **Save and use this
+   map** when ready to test it, then close calibration.
+5. **Use my saved calibration** is now checked in Live. Click **Start camera**,
+   choose the original TV under **Show on**, then **Show on TV**. Uncheck the
+   calibration box to compare with the existing repeated-view layout.
+
+If you already have the working `.npz` from the Windows lab PC, **Load saved
+map…** imports it directly. The mapped output uses the profile's TV resolution;
+subject size, mirroring and brightness still work. The other polar-layout
+controls are disabled while the map is active.
+
+To make a new phone recording on Mac, use **Play for recording** with the TV
+connected as an extended display. Keep recording through the black lead-in,
+all patterns and the final black tail. Load the original phone file when possible.
+
+Will's decoder retains readable leading bits when finer stripes are blurred,
+so some camera pixels map to coarse TV cells. This port preserves that behavior
+to reproduce the lab result; square patches can still appear. A smooth preview
+or high coverage is not an optical accuracy measurement. The Mac preview can
+be tested at your desk; validating correction requires the same cone, TV and
+viewpoint used for the calibration.
+
 ## Advanced settings
 
 Use these to select a camera, request a camera resolution, adjust the cone fit,
@@ -81,5 +119,5 @@ Start with the [lab calibration guide](LAB_CALIBRATION_TEST.md), then use the
 ## Run the tests
 
 ```bash
-QT_QPA_PLATFORM=offscreen macenv/bin/python -m unittest test_processing test_projection test_live_worker test_live_ui -v
+QT_QPA_PLATFORM=offscreen macenv/bin/python -m unittest discover -p 'test_*.py'
 ```

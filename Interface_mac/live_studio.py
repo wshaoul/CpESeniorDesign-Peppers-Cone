@@ -8,10 +8,12 @@ from PySide6.QtCore import Qt, QTimer, QSettings
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
     QDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSpinBox,
-    QVBoxLayout, QWidget)
+    QVBoxLayout, QWidget, QFileDialog)
 
 from processing import open_mac_camera
 from projection import ProjectionSettings, LiveProjector, test_card, alignment_pattern
+from cone_calibration import CalibrationProfile, default_profile_path
+from calibration_studio import CalibrationDialog
 
 
 class Preview(QLabel):
@@ -211,6 +213,9 @@ class LivePage(QWidget):
     def __init__(self):
         super().__init__()
         self.worker = None
+        self.calibration_profile = None
+        self.calibration_path = default_profile_path()
+        self.calibration_dialog = None
         self.sequence = -1
         self.fullscreen = TVWindow()
         self.storage = QSettings("PeppersCone","MacLiveStudio")
@@ -269,6 +274,19 @@ class LivePage(QWidget):
         form.addRow(settings_title)
         form.addRow("Show on",self.screen)
         form.addRow("TV output resolution",self.quality)
+        self.use_calibration = QCheckBox("Use my saved calibration")
+        self.use_calibration.toggled.connect(self.toggle_calibration)
+        form.addRow(self.use_calibration)
+        self.calibration_label = QLabel("Make a map or load one from the lab to test calibrated live output.")
+        self.calibration_label.setWordWrap(True)
+        self.calibration_label.setObjectName("tip")
+        form.addRow(self.calibration_label)
+        calibrate = QPushButton("Calibrate / load recording")
+        calibrate.clicked.connect(self.open_calibration)
+        form.addRow(calibrate)
+        load_map = QPushButton("Load saved map…")
+        load_map.clicked.connect(self.load_calibration)
+        form.addRow(load_map)
         form.addRow(self.background)
         self.background.toggled.connect(self.update_settings)
         refresh = QPushButton("Find my TV")
@@ -387,6 +405,73 @@ class LivePage(QWidget):
         self.resolution.currentIndexChanged.connect(self.source_changed)
         self.camera_index.valueChanged.connect(self.source_changed)
 
+    def open_calibration(self):
+        if not self.stop():
+            return
+        screen = self.screen.currentData() or QApplication.primaryScreen()
+        geometry = screen.geometry()
+        size = (round(geometry.width() * screen.devicePixelRatio()),
+                round(geometry.height() * screen.devicePixelRatio()))
+        if self.calibration_dialog is not None:
+            self.calibration_dialog.close()
+        self.calibration_dialog = CalibrationDialog(screen, size, self)
+        self.calibration_dialog.profile_ready.connect(self.use_calibration_profile)
+        self.calibration_dialog.show()
+
+    def load_calibration(self, path=None):
+        if not path:
+            path, _ = QFileDialog.getOpenFileName(self, "Load a saved cone map", "", "Calibration maps (*.npz)")
+        if not path:
+            return
+        try:
+            profile = CalibrationProfile.load(path)
+        except Exception as exc:
+            self.calibration_label.setText(f"Could not load map: {exc}")
+            return
+        self.use_calibration_profile(profile, path)
+
+    def use_calibration_profile(self, profile, path=None):
+        self.calibration_profile = profile
+        self.calibration_path = path or default_profile_path()
+        self.use_calibration.blockSignals(True)
+        self.use_calibration.setChecked(True)
+        self.use_calibration.blockSignals(False)
+        self.update_settings()
+
+    def toggle_calibration(self, enabled):
+        if enabled:
+            try:
+                self.calibration_profile = CalibrationProfile.load(self.calibration_path)
+            except Exception as exc:
+                self.use_calibration.blockSignals(True)
+                self.use_calibration.setChecked(False)
+                self.use_calibration.blockSignals(False)
+                self.calibration_profile = None
+                self.update_settings()
+                self.calibration_label.setText(f"Could not load saved map: {exc}. Calibrate or load a map first.")
+                return
+        self.update_settings()
+
+    def refresh_calibration_controls(self):
+        active = self.use_calibration.isChecked() and self.calibration_profile is not None
+        for widget in (self.views, self.quality, self.invert, self.portrait_crop, self.antialias):
+            widget.setEnabled(not active)
+        for name, spin in self.spins.items():
+            spin.setEnabled(not active or name in ("zoom", "gain"))
+        if active:
+            width, height = self.calibration_profile.screen_size
+            text = f"Using map: {width} × {height}, {self.calibration_profile.coverage:.0%} screen coverage. Test from the original camera position."
+            screen = self.screen.currentData()
+            if screen is not None:
+                geometry = screen.geometry()
+                actual = (round(geometry.width() * screen.devicePixelRatio()),
+                          round(geometry.height() * screen.devicePixelRatio()))
+                if actual != (width, height):
+                    text += f" Selected display: {actual[0]} × {actual[1]}. Choose the TV used for calibration."
+            self.calibration_label.setText(text)
+        else:
+            self.calibration_label.setText("Calibration off. Make a map or load a saved .npz from the lab.")
+
     def toggle_advanced(self,visible):
         self.advanced_panel.setVisible(visible)
         self.advanced_button.setText("Advanced settings ▾" if visible else "Advanced settings ▸")
@@ -416,10 +501,14 @@ class LivePage(QWidget):
         values = {name:spin.value() for name,spin in self.spins.items()}
         for name in ("diameter","inner","center_x","center_y","zoom"):
             values[name] /= 100
-        return ProjectionSettings(width=w,height=h,views=self.views.currentData(),
+        profile = self.calibration_profile if self.use_calibration.isChecked() else None
+        if profile is not None:
+            w, h = profile.screen_size
+        return ProjectionSettings(width=w,height=h,views=self.views.currentData(),calibration=profile,
             mirror=self.mirror.isChecked(),invert=self.invert.isChecked(),portrait_crop=self.portrait_crop.isChecked(),remove_background=self.background.isChecked(),antialias=self.antialias.isChecked(),**values)
 
     def update_settings(self,*args):
+        self.refresh_calibration_controls()
         if self.worker is not None:
             self.worker.update(self.settings(),self.mode.currentText())
 
@@ -505,3 +594,5 @@ class LivePage(QWidget):
     def shutdown(self):
         self.stop()
         self.timer.stop()
+        if self.calibration_dialog is not None:
+            self.calibration_dialog.close()
