@@ -1,5 +1,8 @@
 """Shared Tk appearance and navigation, matching Interface_mac's studio palette."""
 import importlib
+import json
+import os
+from pathlib import Path
 import traceback
 import tkinter as tk
 from tkinter import ttk
@@ -12,6 +15,52 @@ BLUE = "#315ce8"
 NAVY = "#17243e"
 
 
+# Map the existing studio palette so both renderers share the same appearance.
+DARK_COLORS = {
+    BG: "#111827", WHITE: "#1f2937", INK: "#e5e7eb", MUTED: "#a8b5c9",
+    NAVY: "#dbe7ff", "#15213a": "#e5edff", "#7b8799": "#a8b5c9",
+    "#dce3ef": "#455268", "#e0e5ef": "#455268", "#f8f9fc": "#162032",
+    "#f0f4fd": "#2c3b53", "#e3ebfc": "#354762", "#edf0f6": "#293548",
+    "#a0aabd": "#8391a6", "#e9edf5": "#243147", "#77849a": "#a8b5c9",
+    "#e0e7f3": "#354762", "#e6ecfc": "#263c65", "#3155ac": "#afc6ff",
+}
+SETTINGS_PATH = Path(os.environ.get("APPDATA", Path.home())) / "PeppersCone" / "appearance.json"
+
+
+def load_dark_mode():
+    try:
+        return json.loads(SETTINGS_PATH.read_text(encoding="utf-8")).get("dark_mode") is True
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def theme_color(root, color):
+    return DARK_COLORS.get(color, color) if getattr(root, "dark_mode", False) else color
+
+
+def refresh_widgets(root, widget=None):
+    """Refresh explicit Tk colors; ttk colors are handled by the shared styles."""
+    widget = root if widget is None else widget
+    originals = getattr(widget, "_studio_colors", {})
+    for option in ("background", "foreground", "highlightbackground", "insertbackground"):
+        if option not in widget.keys():
+            continue
+        value = str(widget.cget(option))
+        if option not in originals:
+            originals[option] = value
+        original = originals[option]
+        # White text on the blue brand badge stays white in either theme.
+        if option == "foreground" and original == WHITE and originals.get("background") == BLUE:
+            continue
+        widget.configure(**{option: theme_color(root, original)})
+    widget._studio_colors = originals
+    if isinstance(widget, Card):
+        widget.itemconfigure("surface", fill=theme_color(root, WHITE),
+                             outline=theme_color(root, "#e0e5ef"))
+    for child in widget.winfo_children():
+        refresh_widgets(root, child)
+
+
 def _rounded_buttons(root, style):
     """Nine-slice rounded borders retain ttk's native button interactions."""
     import math
@@ -19,6 +68,7 @@ def _rounded_buttons(root, style):
     images = []
 
     def surface(fill, outline, surround):
+        fill, outline, surround = (theme_color(root, c) for c in (fill, outline, surround))
         size, radius = 29, 12
         image = tk.PhotoImage(master=root, width=size, height=size)
         image.put(surround, to=(0, 0, size, size))
@@ -41,8 +91,13 @@ def _rounded_buttons(root, style):
         "TV.TButton": (NAVY, "#283d60", "#101b30", NAVY, WHITE),
         "Action.TV.TButton": (NAVY, "#283d60", "#101b30", NAVY, BG),
     }
+    if getattr(root, "dark_mode", False):
+        for name in ("TV.TButton", "Action.TV.TButton"):
+            values = palettes[name]
+            palettes[name] = ("#30466d", *values[1:])
+    root._theme_revision = getattr(root, "_theme_revision", 0) + 1
     for name, (normal, hover, pressed, border, surround) in palettes.items():
-        element = f"Rounded.{name}.border"
+        element = f"Rounded{root._theme_revision}.{name}.border"
         base = surface(normal, border, surround)
         disabled = surface("#edf0f6", "#edf0f6", surround)
         down = surface(pressed, border, surround)
@@ -101,6 +156,23 @@ def configure_appearance(root):
     style.map("TNotebook.Tab", background=[("selected", WHITE), ("active", "#e0e7f3")],
               foreground=[("selected", BLUE)])
     style.configure("Preview.TLabel", background="#0f172a", foreground="#94a3b8", anchor="center")
+    if getattr(root, "dark_mode", False):
+        names = (".", "TFrame", "Shell.TFrame", "TLabel", "Header.TLabel",
+                 "PageTitle.TLabel", "PageSubtitle.TLabel", "Body.TLabel", "Quiet.TButton",
+                 "Muted.TLabel", "TButton", "Primary.TButton", "TV.TButton", "TLabelframe",
+                 "TLabelframe.Label", "TEntry", "TCombobox", "TSpinbox", "TNotebook", "TNotebook.Tab")
+        for name in names:
+            for option, value in style.configure(name).items():
+                if isinstance(value, str) and value in DARK_COLORS:
+                    style.configure(name, **{option: theme_color(root, value)})
+            for option, states in style.map(name).items():
+                style.map(name, **{option: [(*state[:-1], theme_color(root, state[-1])) for state in states]})
+        for name in ("Primary.TButton", "TV.TButton"):
+            style.configure(name, foreground=WHITE)
+            style.map(name, foreground=[("disabled", "#8391a6"), ("!disabled", WHITE)])
+        style.configure("TCombobox", arrowcolor=INK)
+    root.option_add("*TCombobox*Listbox.background", theme_color(root, WHITE))
+    root.option_add("*TCombobox*Listbox.foreground", theme_color(root, INK))
     _rounded_buttons(root, style)
 
 
@@ -116,8 +188,8 @@ class Card(tk.Canvas):
             self.delete("surface")
             self.create_polygon(r, 0, w-r, 0, w, 0, w, r, w, h-r,
                                 w, h, w-r, h, r, h, 0, h, 0, h-r,
-                                0, r, 0, 0, smooth=True, fill=WHITE,
-                                outline="#e0e5ef", tags="surface")
+                                0, r, 0, 0, smooth=True, fill=theme_color(self.winfo_toplevel(), WHITE),
+                                outline=theme_color(self.winfo_toplevel(), "#e0e5ef"), tags="surface")
             self.tag_lower("surface")
             self.itemconfigure(window, width=max(1, w-16), height=max(1, h-16))
         self.bind("<Configure>", draw)
@@ -158,6 +230,7 @@ class StudioApp(tk.Tk):
         self.title("Pepper's Cone Studio" + (" — Circle" if circle else ""))
         self.geometry("1280x850")
         self.minsize(1000, 720)
+        self.dark_mode = load_dark_mode()
         configure_appearance(self)
         shell = ttk.Frame(self, style="Shell.TFrame", padding=(24, 20))
         shell.pack(fill="both", expand=True)
@@ -171,6 +244,9 @@ class StudioApp(tk.Tk):
         tk.Label(brand, text="DISPLAY STUDIO", bg=BG, fg="#7b8799", font=("Segoe UI", 9, "bold")).pack(anchor="w")
         tk.Label(header, text="CIRCLE EDITION" if circle else "WINDOWS EDITION", bg="#e6ecfc",
                  fg="#3155ac", padx=12, pady=6, font=("Segoe UI", 9, "bold")).pack(side="right")
+        self.theme_button = ttk.Button(header, command=self.toggle_dark_mode)
+        self.theme_button.pack(side="right", padx=12)
+        self.theme_button.configure(text="Light mode" if self.dark_mode else "Dark mode")
         navigation = ttk.Frame(shell, style="Shell.TFrame")
         navigation.pack(fill="x", pady=(0, 16))
         self.navigation_buttons = {}
@@ -195,7 +271,20 @@ class StudioApp(tk.Tk):
             host = ttk.Frame(self.page_stack, style="Shell.TFrame", padding=(0, 8))
             host.grid(row=0, column=0, sticky="nsew")
             self.hosts[name] = host
+        refresh_widgets(self)
         self.after_idle(lambda: self.show_page("LiveView"))
+
+    def toggle_dark_mode(self):
+        self.dark_mode = not self.dark_mode
+        configure_appearance(self)
+        refresh_widgets(self)
+        self.theme_button.configure(text="Light mode" if self.dark_mode else "Dark mode")
+        try:
+            SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            SETTINGS_PATH.write_text(json.dumps({"dark_mode": self.dark_mode}), encoding="utf-8")
+        except OSError:
+            # A read-only profile must not prevent changing the current session.
+            pass
 
     def _load_selected(self, event=None):
         name, module, _ = next(spec for spec in self.specs if spec[0] == self._selected_page)
@@ -225,6 +314,7 @@ class StudioApp(tk.Tk):
                        command=lambda: self._retry_page(name)).pack(anchor="w", pady=16)
         finally:
             self._loading.discard(name)
+            refresh_widgets(self)
 
     def _retry_page(self, name):
         panel = self._page_errors.pop(name, None)
