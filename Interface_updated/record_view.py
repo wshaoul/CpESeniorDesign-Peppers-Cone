@@ -1,3 +1,4 @@
+from studio_theme import Card, ScrollPanel
 # record_view.py
 import os
 import time
@@ -18,7 +19,7 @@ class RecordView(ttk.Frame):
     """
 
     def __init__(self, parent, controller=None):
-        super().__init__(parent)
+        super().__init__(parent, style="Shell.TFrame")
         self.controller = controller
 
         # --- state ---
@@ -33,14 +34,16 @@ class RecordView(ttk.Frame):
         # --------------------------
         # UI LAYOUT
         # --------------------------
-        root = ttk.Frame(self)
+        root = ttk.Frame(self, style="Shell.TFrame")
         root.pack(fill="both", expand=True)
 
-        left = ttk.Frame(root)
-        left.pack(side="left", fill="y", padx=12, pady=12)
+        controls = ScrollPanel(root, width=420)
+        controls.pack(side="left", fill="y", padx=(0, 18))
+        left = controls.content
 
-        right = ttk.Frame(root)
-        right.pack(side="left", fill="both", expand=True, padx=(0, 12), pady=12)
+        preview_card = Card(root)
+        preview_card.pack(side="left", fill="both", expand=True)
+        right = preview_card.content
 
         # Top row: back + title
         title_row = ttk.Frame(left)
@@ -107,7 +110,7 @@ class RecordView(ttk.Frame):
         # Start/Stop
         actions = ttk.Frame(left)
         actions.pack(fill="x", pady=(4, 0))
-        ttk.Button(actions, text="Start Recording", command=self._start_recording).pack(side="left")
+        ttk.Button(actions, text="Start Recording", style="Primary.TButton", command=self._start_recording).pack(side="left")
         ttk.Button(actions, text="Stop", command=self._stop_recording).pack(side="left", padx=8)
 
         # Open cone screen (process on demand)
@@ -115,13 +118,13 @@ class RecordView(ttk.Frame):
         open_row.pack(fill="x", pady=(8, 0))
         ttk.Button(
             open_row,
-            text="Open Cone Screen (process now)",
+            text="Open Cone Screen", style="TV.TButton",
             command=self._open_cone_screen_process_now
         ).pack(side="left")
 
         # Right preview
         ttk.Label(right, text="Live Preview", style="Header.TLabel").pack(anchor="w")
-        self.preview_label = ttk.Label(right)
+        self.preview_label = ttk.Label(right, text="Open a camera to begin", style="Preview.TLabel")
         self.preview_label.pack(fill="both", expand=True, pady=(6, 0))
 
         # stats

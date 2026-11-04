@@ -1,3 +1,5 @@
+from live_layout import arrange_live, update_cone_preview, place_output
+from studio_theme import Card, ScrollPanel
 # live_view.py
 #
 # Live display view.
@@ -12,7 +14,6 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 import numpy as np
-import mediapipe as mp
 import math
 
 import cv2
@@ -36,13 +37,40 @@ CANVAS_SIZE = 800
 
 
 # ---------- Warp Helpers ----------
-def enhance_saturation_contrast(image_bgr, saturation_scale=1.3, contrast_alpha=1.2, brightness_beta=10):
+def enhance_saturation_contrast(image_bgr, saturation_scale=1.3, contrast_alpha=1.2, brightness_beta=10, gain=1.0):
     # BGR → HSV (float), boost S, back to BGR, then contrast/brightness
     hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
     hsv[:, :, 1] = np.clip(hsv[:, :, 1] * saturation_scale, 0, 255)
     enhanced = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
     enhanced = cv2.convertScaleAbs(enhanced, alpha=contrast_alpha, beta=brightness_beta)
+    # Separate linear brightness gain, applied last so it doesn't interact
+    # with the saturation/contrast math above (a simple exposure-style knob).
+    if gain != 1.0:
+        lut = np.clip(np.arange(256, dtype=np.float32) * gain, 0, 255).astype(np.uint8)
+        enhanced = cv2.LUT(enhanced, lut)
     return enhanced
+
+
+def to_square(frame, crop_to_square=True):
+    """
+    Make a frame square without squashing the subject.
+
+    crop_to_square=True  → crop the central min(h,w) square (loses the edges).
+    crop_to_square=False → letterbox the whole frame onto a black max(h,w) square.
+    Either way x and y keep the same scale, so people are never stretched.
+    """
+    h, w = frame.shape[:2]
+    if h == w:
+        return frame
+    if crop_to_square:
+        side = min(h, w)
+        y0, x0 = (h - side) // 2, (w - side) // 2
+        return frame[y0:y0 + side, x0:x0 + side]
+    side = max(h, w)
+    canvas = np.zeros((side, side, frame.shape[2]), dtype=frame.dtype)
+    y0, x0 = (side - h) // 2, (side - w) // 2
+    canvas[y0:y0 + h, x0:x0 + w] = frame
+    return canvas
 
 
 def build_cone_maps(
@@ -53,11 +81,21 @@ def build_cone_maps(
     r_inner_frac: float = 0.10,
     r_outer_frac: float = 0.99,
     center_frac=(0.50, 0.50),  # <<< NEW: move center of cone
-    radius_frac: float = 1.00,
-):  # <<< NEW: scale radius a bit
+    radius_frac: float = 1.00,  # <<< NEW: scale radius a bit
+    gap_deg: float = 0.0,
+    invert_radius: bool = False,
+    mirror: bool = False,
+):
     """
     Warp for Pepper's Cone showing ONE image on the front arc, mapped only to a radial band.
     Returns map_x, map_y (float32) with -1 for out-of-bounds.
+
+    gap_deg: shrinks the visible arc symmetrically at both edges (leaving a
+        dark seam) without stretching the source frame across a wider band —
+        useful when this arc sits next to another one.
+    invert_radius: flips which end of the source frame maps to the inner vs
+        outer radius (reverses "head/feet" direction along the arc).
+    mirror: flips the source frame left/right within the arc.
     """
 
     # Initialize output arrays
@@ -75,8 +113,13 @@ def build_cone_maps(
     r_in = r_in_frac * R
     r_out = r_out_frac * R
 
-    # Angle setup
-    half = math.radians(max(1, min(359, span_deg))) * 0.5
+    # Angle setup — gap_deg shrinks the *active* half-angle used for both the
+    # validity test and the u-mapping, so the full source frame still fills
+    # the (now narrower) visible band instead of being cropped at the edges.
+    span_deg = max(1, min(359, span_deg))
+    half = math.radians(span_deg) * 0.5
+    gap_half = math.radians(max(0.0, min(span_deg * 0.4, gap_deg))) * 0.5
+    active_half = max(math.radians(0.5), half - gap_half)
     rot = math.radians(rotate_deg)
 
     # Create coordinate grids
@@ -92,29 +135,71 @@ def build_cone_maps(
     ang = np.where(ang < -np.pi, ang + 2 * np.pi, ang)
     ang = np.where(ang > np.pi, ang - 2 * np.pi, ang)
 
-    # Create mask for valid pixels (inside the band and angle range)
-    valid_mask = (r >= r_in) & (r <= r_out) & (ang >= -half) & (ang <= half)
+    # Create mask for valid pixels (inside the band and active angle range)
+    valid_mask = (r >= r_in) & (r <= r_out) & (ang >= -active_half) & (ang <= active_half)
 
     # Calculate UV coordinates only for valid pixels
     if np.any(valid_mask):
-        angle_to_u = 1.0 / (2 * half)
+        angle_to_u = 1.0 / (2 * active_half)
         r_to_v = 1.0 / max(1.0, (r_out - r_in))
 
-        u = (ang[valid_mask] + half) * angle_to_u
+        u = (ang[valid_mask] + active_half) * angle_to_u
         v = 1.0 - ((r[valid_mask] - r_in) * r_to_v)
 
         # Clamp to [0, 1] and convert to pixel coordinates
         u = np.clip(u, 0.0, 1.0)
         v = np.clip(v, 0.0, 1.0)
+        if invert_radius:
+            v = 1.0 - v
 
-        sx = (u * (frame_size - 1)).astype(np.float32)
-        sy = (v * (frame_size - 1)).astype(np.float32)
+        sx = u * (frame_size - 1)
+        if mirror:
+            sx = (frame_size - 1) - sx
+        sy = v * (frame_size - 1)
 
         # Assign to output maps
-        map_x[valid_mask] = sx
-        map_y[valid_mask] = sy
+        map_x[valid_mask] = sx.astype(np.float32)
+        map_y[valid_mask] = sy.astype(np.float32)
 
     return map_x, map_y
+
+
+def alignment_pattern(canvas_size, center_frac, radius_frac, r_inner_frac,
+                       r_outer_frac, rotate_deg, span_deg, gap_deg=0.0):
+    """
+    Draw calibration rings + the visible-arc boundary for physically aligning
+    the cone/display to the current tuning parameters. Not camera-driven —
+    pure geometry, so it renders even with no camera running.
+    """
+    image = np.zeros((canvas_size, canvas_size, 3), np.uint8)
+    cx = int(center_frac[0] * canvas_size)
+    cy = int(center_frac[1] * canvas_size)
+    R = int((canvas_size * 0.5) * max(0.10, min(2.0, radius_frac)))
+    r_in = int(max(0.0, min(0.99, r_inner_frac)) * R)
+    r_out = int(min(1.0, r_outer_frac) * R)
+    r_mid = (r_in + r_out) // 2
+
+    for radius, color in ((r_in, (120, 120, 120)), (r_mid, (90, 90, 90)), (r_out, (200, 200, 200))):
+        cv2.circle(image, (cx, cy), radius, color, 2)
+
+    span_deg = max(1, min(359, span_deg))
+    half = span_deg * 0.5
+    gap_half = max(0.0, min(span_deg * 0.4, gap_deg)) * 0.5
+    active_half = max(0.5, half - gap_half)
+
+    def _draw_ray(deg, color, label):
+        a = math.radians(deg)
+        end = (int(cx + R * math.cos(a)), int(cy + R * math.sin(a)))
+        cv2.line(image, (cx, cy), end, color, 2)
+        pos = (int(cx + R * 0.75 * math.cos(a)), int(cy + R * 0.75 * math.sin(a)))
+        cv2.putText(image, label, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+    _draw_ray(rotate_deg, (0, 180, 255), "CENTER")
+    _draw_ray(rotate_deg - active_half, (255, 180, 0), "EDGE")
+    _draw_ray(rotate_deg + active_half, (255, 180, 0), "EDGE")
+    cv2.putText(image, "Alignment Pattern", (14, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                0.8, (255, 255, 255), 2)
+    return image
 
 # ---------- RealSense helpers ----------
 # for smoother camera output, change to 640, 360, 60 (lower resolution but higher fps)
@@ -224,23 +309,25 @@ class LiveView(ttk.Frame):
     """Live display (preview + fullscreen) using the same open logic as record_view."""
 
     def __init__(self, parent, controller):
-        super().__init__(parent)
+        super().__init__(parent, style="Shell.TFrame")
         self.controller = controller
 
         # Source toggle — initialized here so UI widgets can bind to it immediately
         self._cam_src = tk.StringVar(value="webcam")
 
         # --- Title ---
-        ttk.Label(self, text="Live Display", style="Header.TLabel").pack(pady=(10, 4))
-        ttk.Label(self, text="Pick a camera (index or name), preview it, then open fullscreen for the warped output.", style="Body.TLabel").pack(pady=(0, 10))
+        ttk.Label(self, text="Live display", font=("Segoe UI", 11, "bold"), style="PageTitle.TLabel").pack(anchor="w", pady=(0, 4))
+        ttk.Label(self, text="Your camera. A floating image. Ready to share.", style="PageSubtitle.TLabel").pack(anchor="w", pady=(0, 10))
 
         # Two panes: left controls, right preview
-        top = ttk.Frame(self)
-        top.pack(fill="both", expand=True)
-        left = ttk.Frame(top)
-        left.pack(side="left", fill="both", expand=True, padx=(0, 8))
-        right = ttk.Frame(top)
-        right.pack(side="right", fill="both", expand=True, padx=(8, 0))
+        top = ttk.Frame(self, style="Shell.TFrame")
+        top.pack(fill="both", expand=True, pady=(12, 0))
+        controls = ScrollPanel(top, width=410)
+        controls.pack(side="left", fill="y", padx=(0, 18))
+        left = controls.content
+        preview_card = Card(top)
+        preview_card.pack(side="right", fill="both", expand=True)
+        right = preview_card.content
 
         # --- Camera Source toggle ---
         src_box = ttk.LabelFrame(left, text="Camera Source")
@@ -248,15 +335,15 @@ class LiveView(ttk.Frame):
         ttk.Radiobutton(
             src_box, text="Webcam", variable=self._cam_src,
             value="webcam", command=self._on_src_change,
-        ).pack(side="left", padx=14, pady=6)
+        ).pack(anchor="w", padx=14, pady=6)
         ttk.Radiobutton(
             src_box, text="RealSense D455/D555", variable=self._cam_src,
             value="realsense", command=self._on_src_change,
             state="normal" if REALSENSE_AVAILABLE else "disabled",
-        ).pack(side="left", padx=14, pady=6)
+        ).pack(anchor="w", padx=14, pady=6)
         if not REALSENSE_AVAILABLE:
             ttk.Label(src_box, text="(install pyrealsense2 to enable)",
-                      foreground="#888").pack(side="left", padx=6)
+                      foreground="#888").pack(anchor="w", padx=6)
 
         # --- Camera selection ---
         cam_box = ttk.LabelFrame(left, text="Camera Selection")
@@ -270,24 +357,24 @@ class LiveView(ttk.Frame):
         # index row
         idx_row = ttk.Frame(cam_box)
         ttk.Label(idx_row, text="Index:").grid(row=0, column=0, padx=(0, 6))
-        self.idx_combo = ttk.Combobox(idx_row, state="readonly", width=36, values=self._scan_indices())
+        self.idx_combo = ttk.Combobox(idx_row, state="readonly", width=14, values=[str(index) for index in range(6)])
         self.idx_combo.set(self.idx_combo["values"][0])
         self.idx_combo.grid(row=0, column=1, sticky="w")
-        ttk.Button(idx_row, text="Rescan", command=self._rescan_indices).grid(row=0, column=2, padx=6)
-        ttk.Label(idx_row, text="Backend:").grid(row=0, column=3, padx=(12, 6))
-        self.backend_combo = ttk.Combobox(idx_row, state="readonly", values=[label for (label, _) in BACKENDS], width=22)
+        ttk.Button(idx_row, text="Rescan", command=self._rescan_indices).grid(row=2, column=1, padx=6)
+        ttk.Label(idx_row, text="Backend:").grid(row=1, column=0, padx=(12, 6))
+        self.backend_combo = ttk.Combobox(idx_row, state="readonly", values=[label for (label, _) in BACKENDS], width=14)
         self.backend_combo.set(BACKENDS[0][0])
-        self.backend_combo.grid(row=0, column=4, padx=(0, 6))
+        self.backend_combo.grid(row=1, column=1, padx=(0, 6))
 
         # name row
         name_row = ttk.Frame(cam_box)
         ttk.Label(name_row, text="Device Name:").grid(row=0, column=0, padx=(0, 6))
-        self.name_entry = ttk.Entry(name_row, width=36)
-        self.name_entry.grid(row=0, column=1)
-        ttk.Button(name_row, text="List Cameras (ffmpeg)", command=self._list_names_ffmpeg).grid(row=0, column=2, padx=6)
-        self.names_combo = ttk.Combobox(name_row, state="readonly", width=36, values=[])
-        self.names_combo.grid(row=1, column=1, pady=(6, 0), sticky="w")
-        ttk.Button(name_row, text="Use Selected", command=self._use_selected_name).grid(row=1, column=2, padx=6, pady=(6, 0))
+        self.name_entry = ttk.Entry(name_row, width=14)
+        self.name_entry.grid(row=1, column=0, columnspan=2, sticky="ew")
+        ttk.Button(name_row, text="Find cameras", command=self._list_names_ffmpeg).grid(row=0, column=1, padx=6)
+        self.names_combo = ttk.Combobox(name_row, state="readonly", width=14, values=[])
+        self.names_combo.grid(row=2, column=0, pady=(6, 0), sticky="w")
+        ttk.Button(name_row, text="Use Selected", command=self._use_selected_name).grid(row=2, column=1, padx=6, pady=(6, 0))
 
         # Arrange like: radio, its row; radio, its row
         r1.grid(row=0, column=0, sticky="w", padx=8, pady=(6, 2))
@@ -302,12 +389,15 @@ class LiveView(ttk.Frame):
         self.res_combo = ttk.Combobox(settings, state="readonly", width=12, values=["1280x720", "1920x1080", "640x480"])
         self.res_combo.set("1280x720")
         self.res_combo.grid(row=0, column=1, sticky="w")
-        ttk.Label(settings, text="FPS:").grid(row=0, column=2, padx=(16, 6), pady=8, sticky="w")
+        ttk.Label(settings, text="FPS:").grid(row=1, column=0, padx=(16, 6), pady=8, sticky="w")
         self.fps_entry = ttk.Entry(settings, width=6)
         self.fps_entry.insert(0, "30")
-        self.fps_entry.grid(row=0, column=3, sticky="w")
+        self.fps_entry.grid(row=1, column=1, sticky="w")
         
         # --- Cone Warp Tuning (add after Video Settings section) ---
+        advanced = tk.BooleanVar(value=False)
+        toggle = ttk.Checkbutton(left, text="Advanced cone settings", variable=advanced)
+        toggle.pack(anchor="w", padx=8, pady=(0, 8))
         tuning = ttk.LabelFrame(left, text="Cone Warp Tuning")
         tuning.pack(fill="x", padx=4, pady=(0, 10))
 
@@ -362,44 +452,90 @@ class LiveView(ttk.Frame):
         self.rotate_label = ttk.Label(tuning, text="270")
         self.rotate_label.grid(row=5, column=2, padx=4)
 
+        # Gap between the visible arc and its edges (dark seam)
+        ttk.Label(tuning, text="Edge Gap (deg):").grid(row=6, column=0, padx=(8,4), pady=4, sticky="w")
+        self.gap_var = tk.DoubleVar(value=0.0)
+        self.gap_slider = ttk.Scale(tuning, from_=0, to=40, orient="horizontal",
+                                     variable=self.gap_var, command=self._on_warp_change)
+        self.gap_slider.grid(row=6, column=1, sticky="ew", padx=4)
+        self.gap_label = ttk.Label(tuning, text="0")
+        self.gap_label.grid(row=6, column=2, padx=4)
+
+        # Subject zoom (replaces the old hardcoded 0.6 scale)
+        ttk.Label(tuning, text="Subject Zoom:").grid(row=7, column=0, padx=(8,4), pady=4, sticky="w")
+        self.zoom_var = tk.DoubleVar(value=0.6)
+        self.zoom_slider = ttk.Scale(tuning, from_=0.2, to=1.5, orient="horizontal",
+                                      variable=self.zoom_var, command=self._on_warp_change)
+        self.zoom_slider.grid(row=7, column=1, sticky="ew", padx=4)
+        self.zoom_label = ttk.Label(tuning, text="0.60")
+        self.zoom_label.grid(row=7, column=2, padx=4)
+
+        # Brightness gain (separate from the fixed saturation/contrast boost)
+        ttk.Label(tuning, text="Brightness Gain:").grid(row=8, column=0, padx=(8,4), pady=4, sticky="w")
+        self.gain_var = tk.DoubleVar(value=1.0)
+        self.gain_slider = ttk.Scale(tuning, from_=0.5, to=2.0, orient="horizontal",
+                                      variable=self.gain_var, command=self._on_warp_change)
+        self.gain_slider.grid(row=8, column=1, sticky="ew", padx=4)
+        self.gain_label = ttk.Label(tuning, text="1.00")
+        self.gain_label.grid(row=8, column=2, padx=4)
+
+        # Checkbox row: mirror / invert radius / crop-to-square
+        check_row = ttk.Frame(tuning)
+        check_row.grid(row=9, column=0, columnspan=3, sticky="w", padx=4, pady=(2, 4))
+        self.mirror_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(check_row, text="Mirror", variable=self.mirror_var,
+                         command=self._on_warp_change).pack(anchor="w", padx=6)
+        self.invert_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(check_row, text="Invert radius (head/feet)", variable=self.invert_var,
+                         command=self._on_warp_change).pack(anchor="w", padx=6)
+        self.crop_square_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(check_row, text="Crop to square (avoid squashing)",
+                         variable=self.crop_square_var,
+                         command=self._on_warp_change).pack(anchor="w", padx=6)
+
         tuning.grid_columnconfigure(1, weight=1)
 
         # Reset button
         ttk.Button(tuning, text="Reset to Defaults", command=self._reset_warp_params).grid(
-            row=6, column=0, columnspan=3, pady=8)
-        
+            row=10, column=0, columnspan=3, pady=8)
+
+        tuning.pack_forget()
+        toggle.configure(command=lambda: tuning.pack(fill="x", padx=4, pady=(0, 10))
+                         if advanced.get() else tuning.pack_forget())
+
         # --- Actions ---
-        actions = ttk.Frame(left)
-        actions.pack(pady=(6, 2))
-        self.btn_preview = ttk.Button(actions, text="Start Preview", command=self._start_preview)
+        actions = ttk.Frame(self)
+        actions.pack(side="bottom", fill="x", pady=(14, 2), before=top)
+        self.btn_preview = ttk.Button(actions, text="Start camera", style="Primary.TButton", command=self._start_preview)
         self.btn_stop_preview = ttk.Button(actions, text="Stop Preview", command=self._stop_preview, state="disabled")
-        self.btn_fullscreen = ttk.Button(actions, text="Open Fullscreen", command=self._start_fullscreen)
+        self.btn_fullscreen = ttk.Button(actions, text="Show on TV", style="TV.TButton", command=self._start_fullscreen)
         self.btn_close_fullscreen = ttk.Button(actions, text="Close Fullscreen", command=self._stop_fullscreen, state="disabled")
+        self.btn_align = ttk.Button(actions, text="Show Alignment Pattern", command=self._toggle_alignment_pattern)
         self._stream_var = tk.BooleanVar(value=False)
         self.chk_stream = ttk.Checkbutton(actions, text="Stream to TV (MJPEG)",
                                            variable=self._stream_var,
                                            command=self._toggle_stream)
-        back_btn = ttk.Button(actions, text="Back", command=lambda: controller.show_page("HomePage"))
-        self.btn_preview.grid(row=0, column=0, padx=6)
-        self.btn_stop_preview.grid(row=0, column=1, padx=6)
-        self.btn_fullscreen.grid(row=0, column=2, padx=6)
-        self.btn_close_fullscreen.grid(row=0, column=3, padx=6)
-        self.chk_stream.grid(row=0, column=4, padx=6)
-        back_btn.grid(row=0, column=5, padx=6)
+        self.btn_preview.grid(row=0, column=0, sticky="ew", padx=4, pady=4)
+        self.btn_stop_preview.grid(row=0, column=1, sticky="ew", padx=4, pady=4)
+        self.btn_fullscreen.grid(row=0, column=2, sticky="ew", padx=4, pady=4)
+        self.btn_close_fullscreen.grid(row=0, column=3, sticky="ew", padx=4, pady=4)
+        self.btn_align.grid(row=0, column=4, sticky="ew", padx=4, pady=4)
+        self.chk_stream.grid(row=0, column=5, sticky="ew", padx=4, pady=4)
 
         # --- Status ---
-        status_box = ttk.Frame(left)
-        status_box.pack(fill="x", padx=4, pady=(8, 0))
+        status_box = ttk.Frame(self)
+        status_box.pack(side="bottom", fill="x", padx=4, pady=(8, 0), before=actions)
         self.status = tk.StringVar(value="Status: idle")
         ttk.Label(status_box, textvariable=self.status).pack(anchor="w")
 
         # --- Right: LARGE fixed-size preview (no jumping) ---
-        ttk.Label(right, text="Preview", style="Body.TLabel").pack()
-        preview_container = tk.Frame(right, width=PREVIEW_W, height=PREVIEW_H, bg="black", highlightthickness=0)
-        preview_container.pack(padx=4, pady=4)
+        ttk.Label(right, text="Your camera  /  LIVE SOURCE", style="Body.TLabel").pack()
+        preview_container = tk.Frame(right, width=PREVIEW_W, height=PREVIEW_H, bg="#0f172a", highlightthickness=0)
+        preview_container.pack(fill="both", expand=True, padx=4, pady=4)
+        self._preview_container = preview_container
         preview_container.pack_propagate(False)  # keep container size fixed
 
-        self._preview_label = tk.Label(preview_container, bg="black", bd=0, highlightthickness=0)
+        self._preview_label = tk.Label(preview_container, bg="#0f172a", fg="#94a3b8", text="Press Start camera to begin", bd=0, highlightthickness=0)
         self._preview_label.place(relx=0.5, rely=0.5, anchor="center")
 
         # Preview state
@@ -444,9 +580,12 @@ class LiveView(ttk.Frame):
             radius_frac=1.00,
         )
 
-        self._segmentor = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
+        self._segmentor = None
+        self._segmentor_initialized = False
 
         # init
+        arrange_live(self, top, controls, left, preview_card,
+                     (src_box, cam_box, settings), toggle, tuning, actions, status_box)
         self._update_controls()
         self.after(33, self._preview_tick)  # UI repaint timer
 
@@ -515,7 +654,20 @@ class LiveView(ttk.Frame):
         self.idx_combo.set(vals[0])
 
     # ---------- Preview ----------
+    def _ensure_segmentor(self):
+        """Optional background removal must never prevent the UI from opening."""
+        if self._segmentor_initialized:
+            return
+        self._segmentor_initialized = True
+        try:
+            import mediapipe as mp
+            self._segmentor = mp.solutions.selfie_segmentation.SelfieSegmentation(
+                model_selection=1)
+        except Exception:
+            self._segmentor = None
+
     def _start_preview(self):
+        self._ensure_segmentor()
         if self._preview_thread and self._preview_thread.is_alive():
             return  # already running
 
@@ -674,7 +826,7 @@ class LiveView(ttk.Frame):
 
         if frame is not None:
             fh, fw = frame.shape[:2]
-            scale = min(PREVIEW_W / fw, PREVIEW_H / fh)
+            scale = min(max(1, self._preview_container.winfo_width()) / fw, max(1, self._preview_container.winfo_height()) / fh)
             new_w = max(1, int(fw * scale))
             new_h = max(1, int(fh * scale))
             resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
@@ -684,6 +836,12 @@ class LiveView(ttk.Frame):
             img = ImageTk.PhotoImage(Image.fromarray(rgb))
             self._preview_label.config(image=img)
             self._preview_label.image = img  # keep a reference
+
+        if frame is not None:
+            try:
+                update_cone_preview(self, frame)
+            except Exception as error:
+                self.status.set(f"Cone preview unavailable: {error}")
 
         self.after(33, self._preview_tick)  # ~30 fps UI update
 
@@ -698,7 +856,7 @@ class LiveView(ttk.Frame):
 
         self.fs_win = tk.Toplevel(self)
         self.fs_win.title("Pepper's Cone Display")
-        self.fs_win.attributes("-fullscreen", True)
+        place_output(self)
         self.fs_win.configure(bg="black")
         self.fs_win.bind("<Escape>", lambda e: self._stop_fullscreen())
         self.fs_win.bind("q",        lambda e: self._stop_fullscreen())
@@ -726,7 +884,7 @@ class LiveView(ttk.Frame):
         # Hint overlay — bottom-centre
         self._fs_hint = tk.Label(
             self.fs_win,
-            text="Q / Esc: exit   ·   M: cycle mode   ·   S: switch source",
+            text="Q / Esc: exit   ·   M: cycle mode (incl. alignment)   ·   S: switch source",
             font=("Segoe UI", 10),
             fg="#aaaaaa", bg="#1a1a1a",
             padx=14, pady=5,
@@ -772,18 +930,20 @@ class LiveView(ttk.Frame):
         "normal": "Normal  (background removed)",
         "raw":    "Raw  (no segmentation)",
         "depth":  "Depth map  (RealSense)",
+        "align":  "Alignment Pattern",
     }
 
     def _fs_mode_text(self):
         return f"Mode:  {self._MODE_LABELS.get(self._fs_mode, self._fs_mode)}"
 
     def _fs_cycle_mode(self):
-        """Cycle display mode: normal → raw → depth (depth skipped if unavailable)."""
+        """Cycle display mode: normal → raw → depth → align (depth skipped if unavailable)."""
         modes = ["normal", "raw"]
         with self._frame_lock:
             has_depth = self._last_depth_vis is not None
         if has_depth:
             modes.append("depth")
+        modes.append("align")
 
         if self._fs_mode not in modes:
             self._fs_mode = "normal"
@@ -810,6 +970,21 @@ class LiveView(ttk.Frame):
         if not self._fs_running:
             return
 
+        if self._fs_mode == "align":
+            warped = alignment_pattern(
+                canvas_size=CANVAS_SIZE,
+                center_frac=(self.center_x_var.get(), self.center_y_var.get()),
+                radius_frac=1.00,
+                r_inner_frac=self.r_inner_var.get(),
+                r_outer_frac=self.r_outer_var.get(),
+                rotate_deg=self.rotate_var.get(),
+                span_deg=self.span_var.get(),
+                gap_deg=self.gap_var.get(),
+            )
+            self._render_fullscreen_frame(warped)
+            self.after(16, self._fullscreen_tick)
+            return
+
         frame = None
         with self._frame_lock:
             if self._fs_mode == "depth" and self._last_depth_vis is not None:
@@ -824,44 +999,50 @@ class LiveView(ttk.Frame):
             if self._mjpeg_server is not None and self._mjpeg_server.is_running:
                 self._mjpeg_server.update_frame(warped)
 
-            # Fit to current screen size while preserving aspect
-            try:
-                sw = self.fs_win.winfo_width()
-                sh = self.fs_win.winfo_height()
-                fh, fw = warped.shape[:2]
-                scale = min(sw / fw, sh / fh)
-                new_w, new_h = max(1, int(fw * scale)), max(1, int(fh * scale))
-                interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
-                disp = cv2.resize(warped, (new_w, new_h), interpolation=interp)
-            except Exception:
-                disp = warped
-
-            rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
-            img = ImageTk.PhotoImage(Image.fromarray(rgb))
-            if self._fs_label is not None:
-                self._fs_label.config(image=img)
-                self._fs_label.image = img
-                self._fs_img = img  # keep a reference
+            self._render_fullscreen_frame(warped)
 
         # Aim ~60 Hz for smoother motion; adjust as needed
         self.after(16, self._fullscreen_tick)
+
+    def _render_fullscreen_frame(self, warped):
+        # Fit to current screen size while preserving aspect
+        try:
+            sw = self.fs_win.winfo_width()
+            sh = self.fs_win.winfo_height()
+            fh, fw = warped.shape[:2]
+            scale = min(sw / fw, sh / fh)
+            new_w, new_h = max(1, int(fw * scale)), max(1, int(fh * scale))
+            interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
+            disp = cv2.resize(warped, (new_w, new_h), interpolation=interp)
+        except Exception:
+            disp = warped
+
+        rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
+        img = ImageTk.PhotoImage(Image.fromarray(rgb))
+        if self._fs_label is not None:
+            self._fs_label.config(image=img)
+            self._fs_label.image = img
+            self._fs_img = img  # keep a reference
 
     # ---------- Warp Display ----------
     def _apply_warp(self, frame_bgr, use_segmentation=True):
         """
         Takes a BGR frame from the camera, returns a warped BGR image.
         Steps mirror your CircularConeLive.py:
+        - fit to a square (crop or letterbox, never squash)
         - resize to FRAME_SIZE x FRAME_SIZE
         - optional background removal (MediaPipe)
-        - center/scale subject
+        - center/scale subject (configurable zoom)
         - remap with precomputed circular-cone maps
-        - saturation/contrast enhancement
+        - saturation/contrast/gain enhancement
         """
-        # 1) square input
-        sq = cv2.resize(frame_bgr, (FRAME_SIZE, FRAME_SIZE), interpolation=cv2.INTER_AREA)
+        # 1) square input — crop-to-square (default) avoids squashing a 16:9
+        # webcam frame the way a plain resize-to-square would.
+        fitted = to_square(frame_bgr, crop_to_square=self.crop_square_var.get())
+        sq = cv2.resize(fitted, (FRAME_SIZE, FRAME_SIZE), interpolation=cv2.INTER_AREA)
 
         # 2) optional background removal
-        if use_segmentation and self._segmentor is not None:
+        if use_segmentation and self.remove_background.get() and self._segmentor is not None:
             rgb = cv2.cvtColor(sq, cv2.COLOR_BGR2RGB)
             try:
                 seg = self._segmentor.process(rgb)
@@ -873,22 +1054,33 @@ class LiveView(ttk.Frame):
         else:
             fg = sq
 
-        # 3) center + scale (same defaults as prototype: 0.6)
-        scale = 0.6
-        scaled = cv2.resize(fg, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-        padded = np.zeros_like(fg)
-        y_off = (FRAME_SIZE - scaled.shape[0]) // 2
-        x_off = (FRAME_SIZE - scaled.shape[1]) // 2
-        padded[y_off : y_off + scaled.shape[0], x_off : x_off + scaled.shape[1]] = scaled
+        # 3) center + scale (zoom slider replaces the old hardcoded 0.6)
+        scale = max(0.05, min(1.5, float(self.zoom_var.get())))
+        if scale < 1.0:
+            scaled = cv2.resize(fg, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+            padded = np.zeros_like(fg)
+            y_off = (FRAME_SIZE - scaled.shape[0]) // 2
+            x_off = (FRAME_SIZE - scaled.shape[1]) // 2
+            padded[y_off : y_off + scaled.shape[0], x_off : x_off + scaled.shape[1]] = scaled
+        elif scale > 1.0:
+            big = cv2.resize(fg, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
+            y0 = max(0, (big.shape[0] - FRAME_SIZE) // 2)
+            x0 = max(0, (big.shape[1] - FRAME_SIZE) // 2)
+            padded = big[y0:y0 + FRAME_SIZE, x0:x0 + FRAME_SIZE]
+        else:
+            padded = fg
 
         # 4) cone warp
         warped = cv2.remap(padded, self._map_x, self._map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
 
         # 5) color pop
-        enhanced = enhance_saturation_contrast(warped, saturation_scale=1.4, contrast_alpha=1.8, brightness_beta=-25)
+        enhanced = enhance_saturation_contrast(
+            warped, saturation_scale=1.4, contrast_alpha=1.8, brightness_beta=-25,
+            gain=float(self.gain_var.get()),
+        )
 
         return enhanced
-    
+
     def _on_warp_change(self, _=None):
         """Rebuild warp maps when any slider changes."""
         # Update labels
@@ -898,7 +1090,10 @@ class LiveView(ttk.Frame):
         self.r_outer_label.config(text=f"{self.r_outer_var.get():.3f}")
         self.span_label.config(text=f"{int(self.span_var.get())}")
         self.rotate_label.config(text=f"{int(self.rotate_var.get())}")
-        
+        self.gap_label.config(text=f"{self.gap_var.get():.0f}")
+        self.zoom_label.config(text=f"{self.zoom_var.get():.2f}")
+        self.gain_label.config(text=f"{self.gain_var.get():.2f}")
+
         # Rebuild maps
         self._rebuild_warp_maps()
 
@@ -913,6 +1108,9 @@ class LiveView(ttk.Frame):
             r_outer_frac=self.r_outer_var.get(),
             center_frac=(self.center_x_var.get(), self.center_y_var.get()),
             radius_frac=1.00,
+            gap_deg=self.gap_var.get(),
+            invert_radius=self.invert_var.get(),
+            mirror=self.mirror_var.get(),
         )
 
     def _reset_warp_params(self):
@@ -923,5 +1121,21 @@ class LiveView(ttk.Frame):
         self.r_outer_var.set(0.995)
         self.span_var.set(200)
         self.rotate_var.set(270)
+        self.gap_var.set(0.0)
+        self.zoom_var.set(0.6)
+        self.gain_var.set(1.0)
+        self.mirror_var.set(False)
+        self.invert_var.set(False)
+        self.crop_square_var.set(True)
         self._on_warp_change()
+
+    # ---------- Alignment pattern ----------
+    def _toggle_alignment_pattern(self):
+        """Show/hide the calibration pattern in the fullscreen window."""
+        if not (self.fs_win and self._fs_running):
+            messagebox.showwarning("Alignment Pattern", "Open Fullscreen first.")
+            return
+        self._fs_mode = "normal" if self._fs_mode == "align" else "align"
+        if self._fs_mode_label:
+            self._fs_mode_label.config(text=self._fs_mode_text())
 
