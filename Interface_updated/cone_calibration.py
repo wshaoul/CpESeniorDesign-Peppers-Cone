@@ -266,18 +266,93 @@ class CalibrationProfile:
                        data["valid"].astype(bool), int(data["sample_count"]),view_size)
 
 
-def build_profile(screen_x, screen_y, valid, screen_size, kernel=43, sigma=7):
-    """Invert sparse camera-to-TV samples and smooth them into a dense map."""
+def refine_samples(screen_x, screen_y, valid, sigma=3.0, tolerance=48.0, max_shift=16.0):
+    """Recover sub-cell positions from coarse decodes.
+
+    A pixel whose finest bits were unreadable is only known to lie somewhere in a
+    cell of TV pixels, but the real mapping changes smoothly from one camera pixel
+    to the next. Averaging a pixel's decoded position with its neighbours turns the
+    staircase of cell centres back into a ramp (the move is limited to ``max_shift``
+    so it never leaves the cell it was decoded in). Pixels that disagree with their
+    neighbourhood by more than ``tolerance`` TV pixels are wrong decodes or the
+    cone seam and are dropped. Returns (x, y, kept).
+    """
+    size = int(sigma * 6) | 1
+    sx = screen_x.astype(np.float32)
+    sy = screen_y.astype(np.float32)
+    keep = valid.copy()
+    for _ in range(3):
+        weight = keep.astype(np.float32)
+        total = np.maximum(cv2.GaussianBlur(weight, (size, size), sigma, borderType=cv2.BORDER_CONSTANT), 1e-6)
+        mean_x = cv2.GaussianBlur(sx * weight, (size, size), sigma, borderType=cv2.BORDER_CONSTANT) / total
+        mean_y = cv2.GaussianBlur(sy * weight, (size, size), sigma, borderType=cv2.BORDER_CONSTANT) / total
+        keep = (valid & (total > 0.05)
+                & (np.abs(sx - mean_x) <= tolerance) & (np.abs(sy - mean_y) <= tolerance))
+    weight = keep.astype(np.float32)
+    total = cv2.GaussianBlur(weight, (size, size), sigma, borderType=cv2.BORDER_CONSTANT)
+    safe = np.maximum(total, 1e-6)
+    mean_x = cv2.GaussianBlur(sx * weight, (size, size), sigma, borderType=cv2.BORDER_CONSTANT) / safe
+    mean_y = cv2.GaussianBlur(sy * weight, (size, size), sigma, borderType=cv2.BORDER_CONSTANT) / safe
+    # Next to the edge of the data the average leans inward (a ramp has more of it on one
+    # side); only pixels with nearly their whole neighbourhood present are refined.
+    trusted = total >= 0.9
+    out_x = np.where(trusted, sx + np.clip(mean_x - sx, -max_shift, max_shift), sx)
+    out_y = np.where(trusted, sy + np.clip(mean_y - sy, -max_shift, max_shift), sy)
+    return out_x, out_y, keep
+
+
+def _tidy_map(dense, map_x, map_y, sigma, min_piece=0.10):
+    """Drop stray fragments, fill pinholes, round the edge, and smooth the values."""
+    pieces, labels, stats, _ = cv2.connectedComponentsWithStats(dense.astype(np.uint8), connectivity=8)
+    if pieces > 2:
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        for index, area in enumerate(areas, start=1):
+            if area < min_piece * areas.max():
+                dense = dense & (labels != index)
+    data = dense.astype(np.float32)
+
+    mask = cv2.morphologyEx(dense.astype(np.uint8), cv2.MORPH_CLOSE,
+                            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
+    mask = cv2.GaussianBlur(mask.astype(np.float32), (13, 13), 4) > 0.5   # rounds the stair-stepped edge
+
+    if sigma >= 0.5:
+        size = int(sigma * 6) | 1
+        edge = cv2.BORDER_CONSTANT  # don't invent mirrored data past the screen edge
+        total = cv2.GaussianBlur(data, (size, size), sigma, borderType=edge)
+        safe = np.maximum(total, 1e-6)
+        map_x = cv2.GaussianBlur(map_x * data, (size, size), sigma, borderType=edge) / safe
+        map_y = cv2.GaussianBlur(map_y * data, (size, size), sigma, borderType=edge) / safe
+        mask &= total > 1e-3
+    else:
+        # Pinholes take their value from the data around them.
+        total = np.maximum(cv2.GaussianBlur(data, (9, 9), 2), 1e-6)
+        map_x = np.where(dense, map_x, cv2.GaussianBlur(map_x * data, (9, 9), 2) / total)
+        map_y = np.where(dense, map_y, cv2.GaussianBlur(map_y * data, (9, 9), 2) / total)
+    map_x = np.where(mask, map_x, 0).astype(np.float32)
+    map_y = np.where(mask, map_y, 0).astype(np.float32)
+    return mask, map_x, map_y
+
+
+def build_profile(screen_x, screen_y, valid, screen_size, kernel=43, sigma=7, smooth=8.0):
+    """Invert sparse camera-to-TV samples and smooth them into a dense map.
+
+    ``smooth`` (TV pixels on a 1382-wide screen, scaled to the real width) sets how
+    much the finished map is smoothed; 8 was the best fit to the decoded samples,
+    and the result gets sub-cell positions, no stray fragments and a rounded edge.
+    ``smooth=0`` skips all of that and gives the plain map from the paper.
+    """
     width, height = screen_size
     if screen_x.shape != screen_y.shape or screen_x.shape != valid.shape:
         raise ValueError("Decoded maps and validity mask must have matching shapes")
     camera_height, camera_width = valid.shape
+    if smooth > 0:
+        screen_x, screen_y, valid = refine_samples(screen_x, screen_y, valid)
     ys, xs = np.nonzero(valid)
     if len(xs) < 16:
         raise ValueError("Not enough reflected calibration pixels were detected")
-    qx = screen_x[ys, xs]
-    qy = screen_y[ys, xs]
-    inside = (qx >= 0) & (qx < width) & (qy >= 0) & (qy < height)
+    qx = screen_x[ys, xs].astype(np.float32)
+    qy = screen_y[ys, xs].astype(np.float32)
+    inside = (qx >= 0) & (qx <= width - 1) & (qy >= 0) & (qy <= height - 1)
     xs, ys, qx, qy = xs[inside], ys[inside], qx[inside], qy[inside]
 
     weight = np.zeros((height, width), np.float32)
@@ -285,18 +360,30 @@ def build_profile(screen_x, screen_y, valid, screen_size, kernel=43, sigma=7):
     sum_y = np.zeros_like(weight)
     normalized_x = xs.astype(np.float32) / max(1, camera_width - 1)
     normalized_y = ys.astype(np.float32) / max(1, camera_height - 1)
-    np.add.at(weight, (qy, qx), 1)
-    np.add.at(sum_x, (qy, qx), normalized_x)
-    np.add.at(sum_y, (qy, qx), normalized_y)
+    # Share each sample between the four nearest TV pixels, so a position between
+    # pixels isn't rounded away (whole-pixel positions land entirely on one pixel).
+    x0, y0 = np.floor(qx).astype(np.int64), np.floor(qy).astype(np.int64)
+    frac_x, frac_y = qx - x0, qy - y0
+    for step_x, step_y, share in ((0, 0, (1 - frac_x) * (1 - frac_y)), (1, 0, frac_x * (1 - frac_y)),
+                                  (0, 1, (1 - frac_x) * frac_y), (1, 1, frac_x * frac_y)):
+        column = np.clip(x0 + step_x, 0, width - 1)
+        row = np.clip(y0 + step_y, 0, height - 1)
+        np.add.at(weight, (row, column), share)
+        np.add.at(sum_x, (row, column), share * normalized_x)
+        np.add.at(sum_y, (row, column), share * normalized_y)
 
     kernel = max(3, int(kernel) | 1)
     blurred_weight = cv2.GaussianBlur(weight, (kernel, kernel), sigma)
     blurred_x = cv2.GaussianBlur(sum_x, (kernel, kernel), sigma)
     blurred_y = cv2.GaussianBlur(sum_y, (kernel, kernel), sigma)
-    dense = blurred_weight > 1e-6
+    # A tenth or so of one sample's peak keeps round footprints; the old 1e-6 left
+    # every isolated sample as a hard 43-pixel square.
+    dense = blurred_weight > (1e-6 if smooth <= 0 else 0.15 / (2 * np.pi * sigma ** 2))
     map_x = np.zeros_like(weight)
     map_y = np.zeros_like(weight)
     map_x[dense] = blurred_x[dense] / blurred_weight[dense]
     map_y[dense] = blurred_y[dense] / blurred_weight[dense]
+    if smooth > 0:
+        dense, map_x, map_y = _tidy_map(dense, map_x, map_y, smooth * width / 1382.0)
     return CalibrationProfile(map_x, map_y, dense, int(len(xs)),
-                              (camera_width,camera_height))
+                              (camera_width, camera_height))

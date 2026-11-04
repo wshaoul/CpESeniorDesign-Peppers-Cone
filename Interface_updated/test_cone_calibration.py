@@ -7,8 +7,8 @@ import numpy as np
 import cv2
 
 from cone_calibration import (CalibrationProfile, CalibrationSequence,
-                              build_profile, decode_sequence,
-                              default_profile_path, place_subject)
+                              _tidy_map, build_profile, decode_sequence,
+                              default_profile_path, place_subject, refine_samples)
 
 
 class ConeCalibrationTests(unittest.TestCase):
@@ -173,6 +173,74 @@ class ConeCalibrationTests(unittest.TestCase):
             path = default_profile_path()
         self.assertEqual(path.name, "front_audience_calibration.npz")
         self.assertEqual(path.parent.name, "PeppersCone")
+
+    def test_refine_turns_a_coarse_staircase_back_into_a_ramp(self):
+        cam_w, cam_h, cell = 200, 40, 16
+        true_x = np.tile(np.arange(cam_w, dtype=np.float32) * 4 + 30, (cam_h, 1))
+        coarse = (np.floor(true_x / cell) * cell + cell / 2).astype(np.int32)   # cell centres
+        screen_y = np.full((cam_h, cam_w), 100, np.int32)
+        valid = np.ones((cam_h, cam_w), bool)
+        refined, _, keep = refine_samples(coarse, screen_y, valid)
+        inside = (slice(None), slice(12, -12))
+        raw_error = np.abs(coarse - true_x)[inside].mean()
+        self.assertLess(np.abs(refined - true_x)[inside].mean(), raw_error * .5)
+        self.assertTrue(keep.all())
+        self.assertLessEqual(float(np.abs(refined - coarse).max()), 16.0)   # never leaves its cell
+
+    def test_refine_drops_wrong_decodes_instead_of_averaging_them_in(self):
+        cam_w, cam_h = 120, 80
+        true_x = np.tile(np.arange(cam_w, dtype=np.int32) * 4 + 30, (cam_h, 1))
+        decoded = true_x.copy()
+        decoded[30:33, 50:53] = true_x[30:33, 50:53] + 300                       # a wrong decode
+        screen_y = np.full((cam_h, cam_w), 100, np.int32)
+        refined, _, keep = refine_samples(decoded, screen_y, np.ones((cam_h, cam_w), bool))
+        self.assertFalse(keep[30:33, 50:53].any())
+        around = np.ones((cam_h, cam_w), bool)
+        around[28:35, 48:55] = False
+        self.assertTrue(keep[around].all())
+        interior = around.copy()                       # the crop's own border is left as decoded
+        interior[:8], interior[-8:], interior[:, :8], interior[:, -8:] = False, False, False, False
+        self.assertLess(float(np.abs(refined - true_x)[interior].max()), 2)
+
+    def test_map_cleanup_removes_fragments_and_fills_pinholes(self):
+        yy, xx = np.indices((100, 160), dtype=np.float32)
+        dense = np.zeros((100, 160), bool)
+        dense[20:80, 20:120] = True
+        dense[40:43, 60:63] = False                       # pinhole
+        dense[5:10, 140:145] = True                       # stray fragment
+        mask, map_x, _ = _tidy_map(dense, np.where(dense, xx / 159, 0), np.where(dense, yy / 99, 0), 0)
+        self.assertFalse(mask[5:10, 140:145].any())
+        self.assertTrue(mask[40:43, 60:63].all())
+        np.testing.assert_allclose(map_x[41, 61], 61 / 159, atol=.02)
+        self.assertGreater(mask[20:80, 20:120].mean(), .95)
+
+    def test_smoothing_makes_the_map_smoother_without_losing_fit(self):
+        cam_w, cam_h, tv = 160, 120, (640, 480)
+        cy, cx = np.indices((cam_h, cam_w), dtype=np.float32)
+        true_x = 3.6 * cx + 40 + .4 * cy
+        true_y = 3.2 * cy + 30 + .1 * cx
+        cell = 16
+        coarse_x = (np.floor(true_x / cell) * cell + cell / 2).astype(np.int32)
+        coarse_y = (np.floor(true_y / cell) * cell + cell / 2).astype(np.int32)
+        valid = np.ones((cam_h, cam_w), bool)
+        raw = build_profile(coarse_x, coarse_y, valid, tv, smooth=0)
+        smooth = build_profile(coarse_x, coarse_y, valid, tv)
+        inside = cv2.erode(smooth.valid.astype(np.uint8), np.ones((25, 25), np.uint8)).astype(bool)
+        inside &= cv2.erode(raw.valid.astype(np.uint8), np.ones((25, 25), np.uint8)).astype(bool)
+
+        def roughness(profile):
+            return float(np.abs(cv2.Laplacian(profile.map_x, cv2.CV_32F))[inside].mean())
+
+        def fit_error(profile):
+            ys, xs = np.nonzero(valid[8:-8, 8:-8])
+            ys, xs = ys + 8, xs + 8
+            tx, ty = np.rint(true_x[ys, xs]).astype(int), np.rint(true_y[ys, xs]).astype(int)
+            ok = inside[ty, tx]
+            predicted = profile.map_x[ty[ok], tx[ok]] * (cam_w - 1)
+            return float(np.abs(predicted - xs[ok]).mean())
+
+        self.assertLess(roughness(smooth), roughness(raw) * .7)
+        self.assertLessEqual(fit_error(smooth), fit_error(raw) * 1.05)
 
     def test_sequence_rejects_weak_or_outside_pixels(self):
         sequence = CalibrationSequence(32, 24)
