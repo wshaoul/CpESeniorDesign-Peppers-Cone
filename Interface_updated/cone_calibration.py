@@ -199,11 +199,24 @@ class CalibrationProfile:
     valid: np.ndarray
     sample_count: int = 0
     view_size: tuple | None = None
+    # Where the calibration camera stood. The map is only exact from that viewpoint
+    # (eye height matters most), so it is kept as a note; it does not change the warp.
+    camera_height_in: float | None = None     # lens height above the floor, inches
+    camera_distance_in: float | None = None   # horizontal distance to the cone's centre, inches
     _lookup: dict = field(default_factory=dict, init=False, repr=False, compare=False)
 
     @property
     def screen_size(self):
         return self.map_x.shape[1], self.map_x.shape[0]
+
+    def viewpoint_text(self):
+        """e.g. 'camera 48 in high, 13 ft from the cone'; '' when neither was recorded."""
+        parts = []
+        if self.camera_height_in is not None:
+            parts.append(f"{self.camera_height_in:g} in high")
+        if self.camera_distance_in is not None:
+            parts.append(f"{self.camera_distance_in / 12:g} ft from the cone")
+        return ("camera " + ", ".join(parts)) if parts else ""
 
     @property
     def coverage(self):
@@ -251,7 +264,12 @@ class CalibrationProfile:
                             map_y=self.map_y.astype(np.float32),
                             valid=self.valid.astype(np.uint8),
                             sample_count=np.int64(self.sample_count), version=np.int64(1),
-                            view_size=np.asarray(self.view_size or (0,0),dtype=np.int32))
+                            view_size=np.asarray(self.view_size or (0,0),dtype=np.int32),
+                            # NaN = not recorded. Older readers ignore these extra keys.
+                            camera_height_in=np.float64(np.nan if self.camera_height_in is None
+                                                        else self.camera_height_in),
+                            camera_distance_in=np.float64(np.nan if self.camera_distance_in is None
+                                                          else self.camera_distance_in))
 
     @classmethod
     def load(cls, path):
@@ -261,9 +279,17 @@ class CalibrationProfile:
             view_size = tuple(int(value) for value in data["view_size"]) if "view_size" in data else None
             if view_size == (0,0):
                 view_size = None
+
+            def optional(key):
+                if key not in data:
+                    return None  # profile saved before viewpoints were recorded
+                value = float(data[key])
+                return None if np.isnan(value) else value
+
             return cls(data["map_x"].astype(np.float32),
                        data["map_y"].astype(np.float32),
-                       data["valid"].astype(bool), int(data["sample_count"]),view_size)
+                       data["valid"].astype(bool), int(data["sample_count"]),view_size,
+                       optional("camera_height_in"), optional("camera_distance_in"))
 
 
 def refine_samples(screen_x, screen_y, valid, sigma=3.0, tolerance=48.0, max_shift=16.0):

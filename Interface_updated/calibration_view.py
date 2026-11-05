@@ -559,8 +559,28 @@ class CalibrationView(ttk.Frame):
         verify.pack(fill="x", pady=(12, 0))
         self.btn_plain = ttk.Button(verify, text="Grid without correction", command=lambda: self._show_grid(False))
         self.btn_corrected = ttk.Button(verify, text="Grid with correction", command=lambda: self._show_grid(True))
+        for btn in (self.btn_plain, self.btn_corrected):
+            btn.config(state="disabled")
+            btn.pack(fill="x", pady=(0, 6))
+
+        # Where the calibration camera stood. Optional; saved with the profile as a note,
+        # because the map is only exact from roughly this viewpoint.
+        viewpoint = ttk.Frame(verify)
+        viewpoint.pack(fill="x", pady=(2, 6))
+        ttk.Label(viewpoint, text="Camera height (in):").grid(row=0, column=0, padx=(0, 6), pady=(0, 4), sticky="w")
+        self.cam_height_var = tk.StringVar(value="")
+        ttk.Entry(viewpoint, textvariable=self.cam_height_var, width=7).grid(row=0, column=1, pady=(0, 4), sticky="w")
+        ttk.Label(viewpoint, text="Distance to cone (ft):").grid(row=1, column=0, padx=(0, 6), sticky="w")
+        self.cam_distance_var = tk.StringVar(value="")
+        ttk.Entry(viewpoint, textvariable=self.cam_distance_var, width=7).grid(row=1, column=1, sticky="w")
+        ttk.Label(viewpoint, style="Muted.TLabel", wraplength=340, justify="left", text=(
+            "Optional. Measure lens height from the floor and floor distance to the cone's centre. "
+            "Saved with the profile so you know which seats it suits.")).grid(
+            row=2, column=0, columnspan=2, pady=(4, 0), sticky="w")
+
         self.btn_save = ttk.Button(verify, text="Save profile", style="Primary.TButton", command=self._save_profile)
-        for btn in (self.btn_plain, self.btn_corrected, self.btn_save):
+        self.btn_save_as = ttk.Button(verify, text="Save profile as…", command=self._save_profile_as)
+        for btn in (self.btn_save, self.btn_save_as):
             btn.config(state="disabled")
             btn.pack(fill="x", pady=(0, 6))
 
@@ -882,7 +902,7 @@ class CalibrationView(ttk.Frame):
             self.btn_capture.config(state="disabled")
 
     def _set_verify_enabled(self, enabled):
-        for btn in (self.btn_plain, self.btn_corrected, self.btn_save):
+        for btn in (self.btn_plain, self.btn_corrected, self.btn_save, self.btn_save_as):
             btn.config(state="normal" if enabled else "disabled")
 
     # ---------- Record now, calibrate later ----------
@@ -1028,17 +1048,61 @@ class CalibrationView(ttk.Frame):
         self.status.set(("Status: corrected" if corrected else "Status: uncorrected") +
                         " grid on TV. Compare the reflection in the camera view. Esc/Q or Cancel hides it.")
 
-    def _save_profile(self):
+    def _read_viewpoint(self):
+        """(height_in, distance_in) from the optional fields; None for a blank field.
+
+        Raises ValueError with a message for the status line when a field isn't a positive number.
+        """
+        def parse(var, name, scale):
+            text = var.get().strip()
+            if not text:
+                return None
+            try:
+                value = float(text)
+            except ValueError:
+                raise ValueError(f"{name} must be a number (or left blank).") from None
+            if not (value > 0 and np.isfinite(value)):
+                raise ValueError(f"{name} must be greater than zero (or left blank).")
+            return value * scale
+        return (parse(self.cam_height_var, "Camera height", 1.0),
+                parse(self.cam_distance_var, "Distance to cone", 12.0))
+
+    def _save_profile_as(self):
         if self._profile is None:
             return
-        path = default_profile_path()
+        default = default_profile_path()
+        default.parent.mkdir(parents=True, exist_ok=True)
+        path = filedialog.asksaveasfilename(
+            title="Save distortion map as",
+            initialdir=str(default.parent),
+            initialfile=time.strftime("cone_calibration_%Y-%m-%d_%H%M.npz"),
+            defaultextension=".npz",
+            filetypes=[("Calibration profile", "*.npz")])
+        if path:
+            self._save_profile(Path(path))
+
+    def _save_profile(self, path=None):
+        if self._profile is None:
+            return
+        try:
+            self._profile.camera_height_in, self._profile.camera_distance_in = self._read_viewpoint()
+        except ValueError as exc:
+            self.status.set(f"Status: not saved. {exc}")
+            return
+        is_default = path is None
+        path = path or default_profile_path()
         try:
             self._profile.save(path)
         except (OSError, ValueError) as exc:
             self.status.set(f"Status: could not save calibration: {exc}")
             return
         self._pattern_win.hide()
-        self.status.set(f"Status: profile saved to {path}. Moving the cone, TV or viewpoint requires recalibration.")
+        where = self._profile.viewpoint_text()
+        where = f" Measured from {where}." if where else ""
+        note = ("" if is_default else
+                " This is a copy; the Live tab uses the profile saved with 'Save profile'.")
+        self.status.set(f"Status: profile saved to {path}.{where}{note} "
+                        "Moving the cone, TV or viewpoint requires recalibration.")
 
     def on_hide(self):
         """Called by the studio when another tab is selected; frees the camera for Live/Record."""

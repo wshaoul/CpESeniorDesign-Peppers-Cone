@@ -168,6 +168,36 @@ class ConeCalibrationTests(unittest.TestCase):
         profile.apply(cv2.resize(image, (25, 15)))      # a different size replaces it
         self.assertEqual(len(profile._lookup), 1)
 
+    def test_profile_keeps_camera_viewpoint(self):
+        profile = CalibrationProfile(np.zeros((4, 5), np.float32), np.zeros((4, 5), np.float32),
+                                     np.ones((4, 5), bool), 20, (5, 4),
+                                     camera_height_in=48.0, camera_distance_in=156.0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "profile.npz"
+            profile.save(path)
+            loaded = CalibrationProfile.load(path)
+        self.assertEqual(loaded.camera_height_in, 48.0)
+        self.assertEqual(loaded.camera_distance_in, 156.0)
+        self.assertEqual(loaded.viewpoint_text(), "camera 48 in high, 13 ft from the cone")
+
+    def test_profile_without_viewpoint_loads_as_unknown(self):
+        profile = CalibrationProfile(np.zeros((4, 5), np.float32), np.zeros((4, 5), np.float32),
+                                     np.ones((4, 5), bool), 20)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "profile.npz"
+            profile.save(path)
+            loaded = CalibrationProfile.load(path)
+            # A file from before viewpoints were recorded has no such keys at all.
+            with np.load(path) as data:
+                old = {k: data[k] for k in data.files if not k.startswith("camera_")}
+            old_path = Path(directory) / "old.npz"
+            np.savez_compressed(old_path, **old)
+            old_loaded = CalibrationProfile.load(old_path)
+        for item in (loaded, old_loaded):
+            self.assertIsNone(item.camera_height_in)
+            self.assertIsNone(item.camera_distance_in)
+            self.assertEqual(item.viewpoint_text(), "")
+
     def test_saved_map_lives_in_one_place_for_both_tabs(self):
         with unittest.mock.patch.dict("os.environ", {"APPDATA": r"C:\Users\someone\AppData\Roaming"}):
             path = default_profile_path()

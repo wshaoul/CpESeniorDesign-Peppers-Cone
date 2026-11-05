@@ -1057,6 +1057,9 @@ class LiveView(ttk.Frame):
             return
         width, height = profile.screen_size
         text = f"Using your calibration: {width} × {height}, {profile.coverage:.0%} of the screen mapped."
+        viewpoint = profile.viewpoint_text()
+        if viewpoint:
+            text += f" Measured from {viewpoint}; it looks right from about there."
         index = max(0, self.display_choice.current())
         if index < len(self._displays):
             _, _, display_w, display_h = self._displays[index]
