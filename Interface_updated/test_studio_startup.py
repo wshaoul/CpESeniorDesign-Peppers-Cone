@@ -75,6 +75,40 @@ class StartupTests(unittest.TestCase):
         self.assertIn("RecordView", self.app.pages)
         self.assertFalse(self.callback_errors)
 
+    def test_calibrate_tab_is_windows_only(self):
+        class Page(ttk.Frame):
+            def __init__(self, parent, controller):
+                super().__init__(parent)
+
+        self.assertIn("CalibrationView", self.app.navigation_buttons)
+        with patch("studio_theme.importlib.import_module", return_value=types.SimpleNamespace(LiveView=Page)):
+            self.app.update()  # run the pending startup callback before destroying the root
+            self.app.destroy()  # one Tk root at a time; tearDown destroys the replacement
+            self.app = StudioApp(circle=True)
+            self.app.withdraw()
+            self.app.update()
+        self.assertNotIn("CalibrationView", self.app.navigation_buttons)
+
+    def test_leaving_a_page_calls_on_hide(self):
+        hidden = []
+
+        class Page(ttk.Frame):
+            def __init__(self, parent, controller):
+                super().__init__(parent)
+
+            def on_hide(self):
+                hidden.append(True)
+
+        with patch("studio_theme.importlib.import_module", return_value=types.SimpleNamespace(
+                LiveView=Page, CalibrationView=Page)):
+            self.app.update()
+            self.app.show_page("CalibrationView")
+            self.app.show_page("CalibrationView")
+            self.assertEqual(len(hidden), 1)  # left Live once; re-selecting Calibrate is not a hide
+            self.app.show_page("HomePage")
+        self.assertEqual(len(hidden), 2)
+        self.assertFalse(self.callback_errors)
+
 
 if __name__ == "__main__":
     unittest.main()

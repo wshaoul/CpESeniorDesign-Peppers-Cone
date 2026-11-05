@@ -263,6 +263,8 @@ class StudioApp(tk.Tk):
         self.specs = [("LiveView", "live_view" + suffix, "Live"),
                       ("RecordView", "record_view" + suffix, "Record"),
                       ("UploadView", "upload_view" + suffix, "Upload")]
+        if not circle:
+            self.specs.append(("CalibrationView", "calibration_view", "Calibrate"))
         for name, module, title in self.specs:
             button = ttk.Button(navigation, text=title, style="Action.TButton",
                                 command=lambda selected=name: self.show_page(selected))
@@ -325,6 +327,10 @@ class StudioApp(tk.Tk):
     def show_page(self, name):
         # Existing Back callbacks return to the main Live tab.
         name = "LiveView" if name == "HomePage" else name
+        # Pages that hold hardware (e.g. the calibration camera) release it when left.
+        previous = self.pages.get(self._selected_page)
+        if self._selected_page != name and hasattr(previous, "on_hide"):
+            previous.on_hide()
         self._selected_page = name
         self.hosts[name].tkraise()
         for page_name, button in self.navigation_buttons.items():

@@ -61,6 +61,38 @@ class LiveUITests(unittest.TestCase):
             self.assertFalse(self.page.output_button.isEnabled())
             self.assertTrue(self.page.start_button.isEnabled())
 
+    def test_capture_settings_restart_running_camera(self):
+        self.page.worker = SimpleNamespace(stop=lambda: True)
+        with patch.object(self.page,"start") as restart:
+            self.page.resolution.setCurrentIndex(1)
+            restart.assert_called_once()
+            restart.reset_mock()
+            self.page.camera_index.setValue(1)
+            restart.assert_called_once()
+        self.page.worker = None
+
+    def test_retina_preview_keeps_physical_pixel_detail(self):
+        preview = self.page.preview
+        preview.resize(320,180)
+        frame = np.zeros((1080,1920,3),np.uint8)
+        with patch.object(type(preview),"devicePixelRatioF",return_value=2), patch.object(preview,"setPixmap") as display:
+            preview.set_frame(frame)
+            self.assertEqual(preview.source.width(),640)
+            self.assertEqual(display.call_args.args[0].devicePixelRatio(),2)
+
+    def test_detail_view_uses_original_frame_and_updates_live(self):
+        preview = self.page.preview
+        preview.set_frame(np.zeros((1080,1920,3),np.uint8))
+        preview.show_detail()
+        self.app.processEvents()
+        self.assertTrue(preview.detail_window.isVisible())
+        self.assertIn("1920 × 1080",preview.detail_info.text())
+        self.assertEqual(preview.detail_image.pixmap().width(),1920)
+        preview.set_frame(np.zeros((720,1280,3),np.uint8))
+        self.assertIn("1280 × 720",preview.detail_info.text())
+        self.assertEqual(preview.detail_image.pixmap().width(),1280)
+        preview.detail_window.close()
+
 
 if __name__ == "__main__":
     unittest.main()
